@@ -1,0 +1,16 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+
+# Data (large files, not for version control)
+LongMemEval/data/*.json
+
+# Outputs
+results/
+*.jsonl
