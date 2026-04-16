@@ -9,7 +9,7 @@ from eval import run_eval
 
 DATASET_PATH = "LongMemEval/data/longmemeval_s_cleaned.json"
 
-MEMORY_TYPES = ["full_history", "rag"]
+MEMORY_TYPES = ["full_history", "rag", "rl_memory"]
 
 
 def main():
