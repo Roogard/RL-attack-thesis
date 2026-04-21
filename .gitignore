@@ -14,3 +14,4 @@ LongMemEval/data/*.json
 # Outputs
 results/
 *.jsonl
+logs/
