@@ -262,6 +262,12 @@ def main():
             qid = rng.choice(train_qids)
             question = q_lookup[qid]
 
+            # Gradient checkpointing is needed to fit the backward pass in
+            # memory, but it forces use_cache=False during HF generate(),
+            # which kills KV caching and makes attacker session generation
+            # ~5-10x slower. Disable during rollouts (inference only),
+            # re-enable for the logprob recompute + backward.
+            policy.model.gradient_checkpointing_disable()
             policy.model.eval()
             with torch.no_grad():
                 batch = env.sample_group(qid, question, group_size=group_size, step=step)
@@ -270,6 +276,9 @@ def main():
             baseline = rewards.mean()
             advantages = rewards - baseline
 
+            policy.model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
             policy.model.train()
             optim.zero_grad(set_to_none=True)
             adv_t = torch.tensor(advantages, device=policy.device, dtype=torch.float32)
