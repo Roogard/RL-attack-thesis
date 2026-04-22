@@ -210,17 +210,19 @@ def _generate(model, tokenizer, messages: list[dict], max_new_tokens: int = 512)
     """Run one forward pass and return the decoded response string."""
     import torch
 
-    input_ids = tokenizer.apply_chat_template(
+    inputs = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
         return_tensors="pt",
+        return_dict=True,
     )
     device = next(model.parameters()).device
-    input_ids = input_ids.to(device)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    input_len = inputs["input_ids"].shape[1]
 
     with torch.no_grad():
         output_ids = model.generate(
-            input_ids,
+            **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             temperature=None,
@@ -228,7 +230,7 @@ def _generate(model, tokenizer, messages: list[dict], max_new_tokens: int = 512)
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    new_tokens = output_ids[0, input_ids.shape[1]:]
+    new_tokens = output_ids[0, input_len:]
     return tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 
