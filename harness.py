@@ -169,12 +169,64 @@ def judge_answer_local(question, answer, hypothesis, question_type, question_id)
     Returns:
         bool: True if the answer is judged correct.
     """
-    abstention = "_abs" in question_id
-    prompt = _get_anscheck_prompt(question_type, question, answer, hypothesis, abstention=abstention)
+    return judge_answer_local_batch(
+        [question], [answer], [hypothesis], [question_type], [question_id]
+    )[0]
+
+
+def judge_answer_local_batch(
+    questions, answers, hypotheses, question_types, question_ids,
+):
+    """Batched version of judge_answer_local.
+
+    Runs a single padded forward through the 7B judge for all B rollouts
+    instead of one sequential call per rollout. With max_new_tokens=10 and
+    a GRPO group of 16, this cuts a ~100s sequential loop down to one
+    ~6s batched generate.
+
+    Returns: list[bool] aligned with inputs.
+    """
+    import torch
     model, tokenizer = _get_judge_model()
-    messages = [{"role": "user", "content": prompt}]
-    response = _generate_local_hf(model, tokenizer, messages, max_new_tokens=10)
-    return "yes" in response.lower()
+    prompts = [
+        _get_anscheck_prompt(qt, q, a, h, abstention=("_abs" in qid))
+        for q, a, h, qt, qid in zip(
+            questions, answers, hypotheses, question_types, question_ids
+        )
+    ]
+    messages_batch = [[{"role": "user", "content": p}] for p in prompts]
+    prompt_texts = [
+        tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
+        for m in messages_batch
+    ]
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    prev_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    try:
+        enc = tokenizer(prompt_texts, return_tensors="pt", padding=True)
+    finally:
+        tokenizer.padding_side = prev_side
+
+    device = next(model.parameters()).device
+    enc = {k: v.to(device) for k, v in enc.items()}
+    input_len = enc["input_ids"].shape[1]
+
+    with torch.no_grad():
+        out = model.generate(
+            **enc,
+            max_new_tokens=10,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    decoded = [
+        tokenizer.decode(out[b, input_len:], skip_special_tokens=True).strip().lower()
+        for b in range(out.shape[0])
+    ]
+    return ["yes" in d for d in decoded]
 
 
 # ── Run Questions Pipeline ───────────────────────────────────────────────────

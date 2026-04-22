@@ -23,7 +23,7 @@ from attack.reward import (
     r_retrieval,
     r_stealth,
 )
-from harness import ask_qwen_batch, judge_answer_local
+from harness import ask_qwen_batch, judge_answer_local_batch
 from memory.rag import RAGMemory
 
 
@@ -217,13 +217,13 @@ def run_rollout_group(
         [q["question"]] * group_size,
         [q["question_date"]] * group_size,
     )
-    poisoned_corrects = [
-        judge_answer_local(
-            q["question"], q["answer"], poisoned_preds[g],
-            q["question_type"], q["question_id"]
-        )
-        for g in range(group_size)
-    ]
+    poisoned_corrects = judge_answer_local_batch(
+        [q["question"]] * group_size,
+        [q["answer"]] * group_size,
+        poisoned_preds,
+        [q["question_type"]] * group_size,
+        [q["question_id"]] * group_size,
+    )
     poisoned_pred_embeds = np.asarray(
         embedder.encode(poisoned_preds, normalize_embeddings=True),
         dtype=np.float32,
