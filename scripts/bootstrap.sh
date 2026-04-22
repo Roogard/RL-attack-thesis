@@ -76,8 +76,10 @@ if [[ "${SKIP_MODEL_DOWNLOAD:-0}" != "1" ]]; then
     echo "==> Pre-downloading HF models to $HF_CACHE"
     echo "    (set SKIP_MODEL_DOWNLOAD=1 to skip)"
     "$PY" - <<'PY'
+# Keep this list in sync with _ANSWER_MODEL_ID / _JUDGE_MODEL_ID in harness.py
+# and _MODEL_ID in memory/rl_memory.py
 from transformers import AutoModelForCausalLM, AutoTokenizer
-for m in ["Qwen/Qwen2.5-4B-Instruct", "Qwen/Qwen2.5-7B-Instruct", "driaforall/mem-agent"]:
+for m in ["Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen2.5-7B-Instruct", "driaforall/mem-agent"]:
     print(f"  fetching {m} ...", flush=True)
     AutoTokenizer.from_pretrained(m)
     AutoModelForCausalLM.from_pretrained(m)
