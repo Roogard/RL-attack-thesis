@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from memory import _vllm_engines
 from memory.rag import RAGMemory
 from harness import ask_qwen_batch, judge_answer_local
 
@@ -210,6 +211,11 @@ def main():
     args = parser.parse_args()
 
     assert 1 <= args.n_poison <= 3, "This sanity script only defines 3 poison sessions."
+
+    # Pre-load the vLLM answer engine before anything else touches CUDA
+    # (RAGMemory's chromadb / sentence-transformers init can poison the
+    # parent CUDA context and make vLLM's subprocess init fail).
+    _vllm_engines.get_answer_engine()
 
     with io.open(args.data, encoding="utf-8") as f:
         data = json.load(f)
