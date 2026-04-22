@@ -80,21 +80,22 @@ def _get_judge_model():
 def _generate_local(model, tokenizer, messages, max_new_tokens=256):
     """Run one forward pass with a chat model and return the decoded string."""
     import torch
-    ids = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, return_tensors="pt"
+    inputs = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, return_tensors="pt", return_dict=True
     )
     device = next(model.parameters()).device
-    ids = ids.to(device)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    input_len = inputs["input_ids"].shape[1]
     with torch.no_grad():
         out = model.generate(
-            ids,
+            **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             temperature=None,
             top_p=None,
             pad_token_id=tokenizer.eos_token_id,
         )
-    return tokenizer.decode(out[0, ids.shape[1]:], skip_special_tokens=True).strip()
+    return tokenizer.decode(out[0, input_len:], skip_special_tokens=True).strip()
 
 
 # ── Answer Generation (Qwen2.5-4B-Instruct) ─────────────────────────────────
