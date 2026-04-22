@@ -40,3 +40,26 @@ class MemoryStore(ABC):
     def clear(self):
         """Reset the store between questions."""
         pass
+
+    @classmethod
+    def index_batch(cls, instances, questions):
+        """Index B questions in parallel.
+
+        Default implementation just loops sequentially. Memory types whose
+        index() does heavy LLM work (RLMemory) override this to actually
+        batch generate() calls across questions, which is what saturates
+        the GPU under continuous batching.
+
+        Args:
+            instances: list of B already-cleared MemoryStore instances
+            questions: list of B question dicts (LongMemEval items)
+        """
+        for inst, q in zip(instances, questions):
+            inst.index(
+                q["haystack_sessions"],
+                q["haystack_dates"],
+                q.get(
+                    "haystack_session_ids",
+                    [str(i) for i in range(len(q["haystack_sessions"]))],
+                ),
+            )

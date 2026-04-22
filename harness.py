@@ -78,9 +78,10 @@ def _generate_local_hf(model, tokenizer, messages, max_new_tokens=256):
 
 # ── Answer Generation (Qwen2.5-3B-Instruct via vLLM) ────────────────────────
 
-def ask_qwen(context, question, question_date):
-    """Call the local Qwen answering model with retrieved context. Returns answer string."""
-    engine, tokenizer = _vllm_engines.get_answer_engine()
+_ANSWER_SYSTEM = "You are a helpful assistant with access to a user's conversation history."
+
+
+def _build_answer_messages(context: str, question: str, question_date: str):
     prompt = (
         f"Here is the conversation history with a user:\n\n"
         f"{context}\n\n"
@@ -88,11 +89,32 @@ def ask_qwen(context, question, question_date):
         f"Question: {question}\n"
         f"Answer concisely."
     )
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant with access to a user's conversation history."},
+    return [
+        {"role": "system", "content": _ANSWER_SYSTEM},
         {"role": "user", "content": prompt},
     ]
+
+
+def ask_qwen(context, question, question_date):
+    """Single-question answer call. Kept for callers that don't batch."""
+    engine, tokenizer = _vllm_engines.get_answer_engine()
+    messages = _build_answer_messages(context, question, question_date)
     return _vllm_engines.generate_one(engine, tokenizer, messages, max_new_tokens=256).strip()
+
+
+def ask_qwen_batch(contexts, questions, question_dates):
+    """Batched answer call — one vLLM.generate() over B prompts.
+
+    Big win for full_history (B 115K-token prefills packed together);
+    modest win for rl_memory / rag (small contexts, decode-bound).
+    """
+    engine, tokenizer = _vllm_engines.get_answer_engine()
+    messages_batch = [
+        _build_answer_messages(c, q, d)
+        for c, q, d in zip(contexts, questions, question_dates)
+    ]
+    texts = _vllm_engines.generate_many(engine, tokenizer, messages_batch, max_new_tokens=256)
+    return [t.strip() for t in texts]
 
 
 # ── Answer Judging — GPT-4o (final eval only) ────────────────────────────────
@@ -157,39 +179,75 @@ def judge_answer_local(question, answer, hypothesis, question_type, question_id)
 
 # ── Run Questions Pipeline ───────────────────────────────────────────────────
 
-def run_questions(data, memory_store, output_path, limit=None):
-    """Run the full question-answering pipeline for a memory store.
+def run_questions(data, memory_factory, output_path, batch_size=16, limit=None):
+    """Run the full question-answering pipeline in batches of `batch_size`.
+
+    Each batch creates B fresh MemoryStore instances, runs batched
+    indexing (RLMemory overrides index_batch with cross-question batching),
+    then a single batched ask_qwen call. This keeps vLLM's continuous
+    batching saturated.
 
     Args:
         data: list of LongMemEval question dicts
-        memory_store: a MemoryStore instance (handles indexing + retrieval)
+        memory_factory: MemoryStore subclass (we call it like a factory: factory())
         output_path: path to write JSONL predictions
+        batch_size: number of questions per batch
         limit: optional cap on number of questions (None = all)
     """
     questions = data[:limit] if limit else data
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     with open(output_path, "w", encoding="utf-8") as out_f:
-        for item in tqdm(questions, desc=f"Running {os.path.basename(output_path)}"):
-            memory_store.clear()
-            memory_store.index(
-                item["haystack_sessions"],
-                item["haystack_dates"],
-                item.get("haystack_session_ids", [str(i) for i in range(len(item["haystack_sessions"]))]),
-            )
-            context = memory_store.retrieve(item["question"], item["question_date"])
+        for batch_start in tqdm(
+            range(0, len(questions), batch_size),
+            desc=f"Running {os.path.basename(output_path)}",
+        ):
+            batch = questions[batch_start : batch_start + batch_size]
+            instances = [memory_factory() for _ in batch]
+            for inst in instances:
+                inst.clear()
 
             try:
-                prediction = ask_qwen(context, item["question"], item["question_date"])
+                memory_factory.index_batch(instances, batch)
             except Exception as e:
-                prediction = ""
-                print(f"Error on {item['question_id']}: {type(e).__name__}: {e}")
+                print(f"Batch index error at batch_start={batch_start}: {type(e).__name__}: {e}")
                 traceback.print_exc()
+                # Skip this batch entirely — write empty hypotheses so qids stay aligned
+                for q in batch:
+                    out_f.write(json.dumps({"question_id": q["question_id"], "hypothesis": ""}) + "\n")
+                _drop_instances(instances)
+                continue
 
-            result = {
-                "question_id": item["question_id"],
-                "hypothesis": prediction,
-            }
-            out_f.write(json.dumps(result) + "\n")
+            contexts = [
+                inst.retrieve(q["question"], q["question_date"])
+                for inst, q in zip(instances, batch)
+            ]
+
+            try:
+                predictions = ask_qwen_batch(
+                    contexts,
+                    [q["question"] for q in batch],
+                    [q["question_date"] for q in batch],
+                )
+            except Exception as e:
+                print(f"Batch answer error at batch_start={batch_start}: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                predictions = [""] * len(batch)
+
+            for q, pred in zip(batch, predictions):
+                out_f.write(json.dumps({"question_id": q["question_id"], "hypothesis": pred}) + "\n")
+            out_f.flush()
+
+            _drop_instances(instances)
 
     print(f"Predictions saved to {output_path}")
+
+
+def _drop_instances(instances):
+    """Help tmpdir-backed stores (RLMemory) clean up promptly."""
+    for inst in instances:
+        try:
+            inst.clear()
+        except Exception:
+            pass
+    instances.clear()

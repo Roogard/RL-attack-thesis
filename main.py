@@ -21,6 +21,8 @@ def main():
     parser.add_argument("--shard-n", type=int, default=1, help="Total number of shards")
     parser.add_argument("--run-dir", type=str, default=None,
                         help="Reuse an existing results dir (lets sibling shards write into the same dir)")
+    parser.add_argument("--batch-size", type=int, default=16,
+                        help="Questions per batch (vLLM cross-question batching)")
     args = parser.parse_args()
 
     if not (0 <= args.shard_i < args.shard_n):
@@ -52,15 +54,18 @@ def main():
     # Run each memory type
     for name in types_to_run:
         print(f"\n{'='*60}")
-        print(f"Memory type: {name}")
+        print(f"Memory type: {name}  (batch_size={args.batch_size})")
         print(f"{'='*60}")
-        store = MEMORY_REGISTRY[name]()
+        factory = MEMORY_REGISTRY[name]
         if args.shard_n > 1:
             output_name = f"{name}.shard{args.shard_i}of{args.shard_n}.jsonl"
         else:
             output_name = f"{name}.jsonl"
         output_path = os.path.join(run_dir, output_name)
-        harness.run_questions(data, store, output_path, limit=args.limit)
+        harness.run_questions(
+            data, factory, output_path,
+            batch_size=args.batch_size, limit=args.limit,
+        )
 
     # Evaluate (skip when running a single shard — merge first, then judge)
     if args.shard_n > 1 and not args.skip_eval:

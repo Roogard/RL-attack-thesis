@@ -21,7 +21,7 @@ from typing import Any
 _MEM_MODEL_ID = "driaforall/mem-agent"
 _ANSWER_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
-_GPU_MEM_UTIL = 0.4
+_GPU_MEM_UTIL = 0.45
 
 _mem_engine = None
 _mem_tokenizer = None
@@ -99,10 +99,25 @@ def get_answer_engine():
 
 def generate_one(engine, tokenizer, messages: list[dict], max_new_tokens: int) -> str:
     """Run one greedy generation through a vLLM engine. Returns decoded text."""
+    return generate_many(engine, tokenizer, [messages], max_new_tokens)[0]
+
+
+def generate_many(
+    engine,
+    tokenizer,
+    messages_batch: list[list[dict]],
+    max_new_tokens: int,
+) -> list[str]:
+    """Run B greedy generations in one vLLM call. Returns texts in input order.
+
+    This is the throughput lever — calling generate() with B prompts at once
+    lets vLLM's continuous batching keep the GPU saturated during decode.
+    """
     from vllm import SamplingParams
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    prompts = [
+        tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
+        for m in messages_batch
+    ]
     params = SamplingParams(temperature=0.0, max_tokens=max_new_tokens)
-    out = engine.generate([prompt], params, use_tqdm=False)
-    return out[0].outputs[0].text
+    outputs = engine.generate(prompts, params, use_tqdm=False)
+    return [o.outputs[0].text for o in outputs]
