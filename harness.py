@@ -50,19 +50,25 @@ def _get_answer_model():
                 # Enable YaRN RoPE scaling to extend context 32K -> 128K.
                 # LongMemEval-S haystacks run ~115K tokens so full_history needs this.
                 config = AutoConfig.from_pretrained(_ANSWER_MODEL_ID)
+                # rope_theta lives either at top-level (old) or inside rope_parameters (new).
+                # Either can be None on some versions — fall through to Qwen2.5's published default.
+                existing = dict(getattr(config, "rope_parameters", {}) or {})
+                rope_theta = (
+                    existing.get("rope_theta")
+                    or getattr(config, "rope_theta", None)
+                    or 1000000.0
+                )
                 yarn_cfg = {
                     "rope_type": "yarn",
                     "factor": 4.0,
                     "original_max_position_embeddings": 32768,
+                    "rope_theta": rope_theta,
                 }
-                # Merge into existing rope_parameters so rope_theta (and friends) are preserved.
-                # Newer transformers reads rope_parameters; older ones read rope_scaling. Set both.
-                rope_params = dict(getattr(config, "rope_parameters", {}) or {})
-                rope_params.update(yarn_cfg)
-                rope_params.setdefault("rope_theta", getattr(config, "rope_theta", 1000000.0))
-                config.rope_parameters = rope_params
+                config.rope_parameters = yarn_cfg
                 config.rope_scaling = {**yarn_cfg, "type": "yarn"}
+                config.rope_theta = rope_theta
                 config.max_position_embeddings = 131072
+                print(f"[harness] YaRN config: {config.rope_parameters}")
                 _answer_tokenizer = AutoTokenizer.from_pretrained(_ANSWER_MODEL_ID)
                 _answer_model = AutoModelForCausalLM.from_pretrained(
                     _ANSWER_MODEL_ID,
