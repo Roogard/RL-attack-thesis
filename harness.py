@@ -26,7 +26,7 @@ def _get_openai_client():
 
 # ── Local Qwen model singletons ──────────────────────────────────────────────
 
-_ANSWER_MODEL_ID = "Qwen/Qwen2.5-4B-Instruct"
+_ANSWER_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 _JUDGE_MODEL_ID  = "Qwen/Qwen2.5-7B-Instruct"
 
 _answer_model     = None
