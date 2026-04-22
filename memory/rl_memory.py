@@ -195,14 +195,25 @@ def _make_file_ops(base_dir: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _exec_code(code: str, file_ops: dict[str, Any]) -> dict:
-    """Execute model-generated code in an isolated namespace."""
+    """Execute model-generated code in an isolated namespace.
+
+    Captures stdout so the agent's own print() observations are fed back
+    into the next <result> block instead of leaking to our terminal.
+    """
+    import contextlib
+    import io
     exec_globals: dict = {"__builtins__": builtins.__dict__}
     exec_globals.update(file_ops)
     exec_locals: dict = {}
+    buf = io.StringIO()
     try:
-        exec(compile(code, "<mem-agent>", "exec"), exec_globals, exec_locals)
+        with contextlib.redirect_stdout(buf):
+            exec(compile(code, "<mem-agent>", "exec"), exec_globals, exec_locals)
     except Exception as e:
         exec_locals["_exec_error"] = str(e)
+    captured = buf.getvalue()
+    if captured:
+        exec_locals["_stdout"] = captured
     return exec_locals
 
 
