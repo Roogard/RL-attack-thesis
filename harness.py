@@ -45,16 +45,26 @@ def _get_answer_model():
         with _answer_lock:
             if _answer_model is None:
                 import torch
-                from transformers import AutoModelForCausalLM, AutoTokenizer
+                from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
                 print(f"[harness] Loading answering model {_ANSWER_MODEL_ID} ...")
+                # Enable YaRN RoPE scaling to extend context 32K -> 128K.
+                # LongMemEval-S haystacks run ~115K tokens so full_history needs this.
+                config = AutoConfig.from_pretrained(_ANSWER_MODEL_ID)
+                config.rope_scaling = {
+                    "type": "yarn",
+                    "factor": 4.0,
+                    "original_max_position_embeddings": 32768,
+                }
+                config.max_position_embeddings = 131072
                 _answer_tokenizer = AutoTokenizer.from_pretrained(_ANSWER_MODEL_ID)
                 _answer_model = AutoModelForCausalLM.from_pretrained(
                     _ANSWER_MODEL_ID,
+                    config=config,
                     torch_dtype=torch.bfloat16,
                     device_map="auto",
                 )
                 _answer_model.eval()
-                print("[harness] Answering model loaded.")
+                print("[harness] Answering model loaded (YaRN, 128K context).")
     return _answer_model, _answer_tokenizer
 
 
