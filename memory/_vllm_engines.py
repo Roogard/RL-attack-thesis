@@ -21,7 +21,7 @@ from typing import Any
 _MEM_MODEL_ID = "driaforall/mem-agent"
 _ANSWER_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
-_GPU_MEM_UTIL = 0.45
+_GPU_MEM_UTIL = 0.40
 
 _mem_engine = None
 _mem_tokenizer = None
@@ -82,7 +82,7 @@ def get_answer_engine():
                 _answer_engine = _build_engine(
                     _ANSWER_MODEL_ID,
                     max_model_len=131072,
-                    enable_prefix_caching=False,
+                    enable_prefix_caching=True,
                     hf_overrides={
                         "rope_scaling": {
                             "rope_type": "yarn",
