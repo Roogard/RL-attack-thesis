@@ -15,20 +15,11 @@ import os
 import re
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 from typing import Any
 
+from memory import _vllm_engines
 from memory.base import MemoryStore
-
-# ---------------------------------------------------------------------------
-# Module-level lazy singleton for the 4B model
-# ---------------------------------------------------------------------------
-
-_MODEL = None
-_TOKENIZER = None
-_MODEL_LOCK = threading.Lock()
-_MODEL_ID = "driaforall/mem-agent"
 
 SYSTEM_PROMPT = """You are an LLM agent with a self-managed, Obsidian-like memory system. \
 You interact with memory using Python code blocks.
@@ -75,27 +66,6 @@ check_if_dir_exists(dir_path: str) -> bool
 """
 
 _PYTHON_RE = re.compile(r"<python>(.*?)</python>", re.DOTALL)
-
-
-def _get_model():
-    """Lazy-load the model and tokenizer exactly once (thread-safe)."""
-    global _MODEL, _TOKENIZER
-    if _MODEL is None:
-        with _MODEL_LOCK:
-            if _MODEL is None:
-                import torch
-                from transformers import AutoModelForCausalLM, AutoTokenizer
-
-                print(f"[RLMemory] Loading {_MODEL_ID} ...")
-                _TOKENIZER = AutoTokenizer.from_pretrained(_MODEL_ID)
-                _MODEL = AutoModelForCausalLM.from_pretrained(
-                    _MODEL_ID,
-                    torch_dtype=torch.bfloat16,
-                    device_map="auto",
-                )
-                _MODEL.eval()
-                print("[RLMemory] Model loaded.")
-    return _MODEL, _TOKENIZER
 
 
 # ---------------------------------------------------------------------------
@@ -217,36 +187,8 @@ def _exec_code(code: str, file_ops: dict[str, Any]) -> dict:
     return exec_locals
 
 
-def _generate(model, tokenizer, messages: list[dict], max_new_tokens: int = 512) -> str:
-    """Run one forward pass and return the decoded response string."""
-    import torch
-
-    inputs = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        return_tensors="pt",
-        return_dict=True,
-    )
-    device = next(model.parameters()).device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    input_len = inputs["input_ids"].shape[1]
-
-    with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    new_tokens = output_ids[0, input_len:]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True)
-
-
 def _run_agentic_loop(
-    model,
+    engine,
     tokenizer,
     user_message: str,
     file_ops: dict[str, Any],
@@ -257,6 +199,7 @@ def _run_agentic_loop(
 
     Loop: generate → parse <python> → exec → append <result> → repeat.
     Terminates when <python> is empty or max_tool_turns is reached.
+    vLLM's automatic prefix caching makes the growing prompt cheap.
     """
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -264,7 +207,9 @@ def _run_agentic_loop(
     ]
 
     for _ in range(max_tool_turns):
-        response = _generate(model, tokenizer, messages)
+        response = _vllm_engines.generate_one(
+            engine, tokenizer, messages, max_new_tokens=512
+        )
         messages.append({"role": "assistant", "content": response})
 
         m = _PYTHON_RE.search(response)
@@ -322,13 +267,13 @@ class RLMemory(MemoryStore):
         os.makedirs(self._memory_dir, exist_ok=True)
 
     def index(self, sessions, dates, session_ids):
-        model, tokenizer = _get_model()
+        engine, tokenizer = _vllm_engines.get_mem_engine()
         file_ops = _make_file_ops(self._memory_dir)
 
         for session, date, sid in zip(sessions, dates, session_ids):
             user_msg = _format_session_for_indexing(session, date)
             _run_agentic_loop(
-                model, tokenizer, user_msg, file_ops,
+                engine, tokenizer, user_msg, file_ops,
                 max_tool_turns=self.max_tool_turns,
             )
 
