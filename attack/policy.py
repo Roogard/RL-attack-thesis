@@ -159,6 +159,18 @@ class AttackerPolicy:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id, torch_dtype=dtype, device_map=self.device
         )
+        # Gradient checkpointing is required — the logprob-recompute forward
+        # pass covers (group_size * n_poison) sessions of up to 1024 tokens
+        # through a 3B model with grads, which otherwise spikes activation
+        # memory past an H200 when the 7B judge + vLLM answer engine share
+        # the same GPU. use_reentrant=False + enable_input_require_grads is
+        # the PEFT-compatible idiom (grads must flow through the frozen base
+        # model's inputs to reach the LoRA adapters).
+        self.model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        if hasattr(self.model, "enable_input_require_grads"):
+            self.model.enable_input_require_grads()
         self.model.eval()
         self._lora_attached = False
 
