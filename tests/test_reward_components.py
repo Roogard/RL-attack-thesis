@@ -165,7 +165,7 @@ def test_curriculum_weights_sum_to_one_at_each_phase():
 def test_compose_group_returns_one_scalar_per_member():
     scores = [
         ComponentScores(1.0, 0.2, 0.5, -0.3, -0.1),
-        ComponentScores(0.0, 0.1, 0.0,  0.0,  0.0),
+        ComponentScores(0.0, 0.0, 0.0,  0.0,  0.0),
         ComponentScores(-1.0, -0.2, -0.5, 0.3, 0.1),
     ]
     w = curriculum_weights_for_step(1000)
