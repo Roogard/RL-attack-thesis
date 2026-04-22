@@ -9,4 +9,6 @@ transformers>=4.45.0
 torch>=2.3.0
 accelerate>=0.33.0
 vllm>=0.7.0
+peft
+pyyaml
 pytest

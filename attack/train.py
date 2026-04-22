@@ -167,6 +167,15 @@ def main():
 
     cfg = load_config(args.config)
 
+    # Pre-load the vLLM answer engine BEFORE any HF model touches CUDA in
+    # this process. Same root cause as harness.run_questions: once the
+    # parent has CUDA state, vLLM's forked EngineCore subprocess fails to
+    # init. CleanCache.build implicitly does this preload via
+    # ask_qwen_batch, but when the cache hits disk (common path) nothing
+    # else loads the engine before AttackerPolicy — first rollout crashes.
+    from memory import _vllm_engines
+    _vllm_engines.get_answer_engine()
+
     # ── data & cache ─────────────────────────────────────────────────────
     print("[train] loading train split ...")
     train_qs = load_dataset(cfg["data_path"], cfg["split_path"], "train")
