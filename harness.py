@@ -55,8 +55,12 @@ def _get_answer_model():
                     "factor": 4.0,
                     "original_max_position_embeddings": 32768,
                 }
+                # Merge into existing rope_parameters so rope_theta (and friends) are preserved.
                 # Newer transformers reads rope_parameters; older ones read rope_scaling. Set both.
-                config.rope_parameters = yarn_cfg
+                rope_params = dict(getattr(config, "rope_parameters", {}) or {})
+                rope_params.update(yarn_cfg)
+                rope_params.setdefault("rope_theta", getattr(config, "rope_theta", 1000000.0))
+                config.rope_parameters = rope_params
                 config.rope_scaling = {**yarn_cfg, "type": "yarn"}
                 config.max_position_embeddings = 131072
                 _answer_tokenizer = AutoTokenizer.from_pretrained(_ANSWER_MODEL_ID)
