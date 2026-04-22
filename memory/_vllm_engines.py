@@ -15,13 +15,17 @@ to a growing prompt every turn — vLLM reuses the prefix KV cache.
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any
 
 _MEM_MODEL_ID = "driaforall/mem-agent"
 _ANSWER_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
-_GPU_MEM_UTIL = 0.40
+# Override with VLLM_GPU_MEM_UTIL=0.25 etc. when sharing a GPU with other
+# jobs or when the training-time HF models (AttackerPolicy + 7B judge +
+# activations) need more headroom on the same device.
+_GPU_MEM_UTIL = float(os.environ.get("VLLM_GPU_MEM_UTIL", "0.40"))
 
 _mem_engine = None
 _mem_tokenizer = None
