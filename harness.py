@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import traceback
 
 import backoff
 import openai
@@ -203,7 +204,8 @@ def run_questions(data, memory_store, output_path, limit=None):
                 prediction = ask_qwen(context, item["question"], item["question_date"])
             except Exception as e:
                 prediction = ""
-                print(f"Error on {item['question_id']}: {e}")
+                print(f"Error on {item['question_id']}: {type(e).__name__}: {e}")
+                traceback.print_exc()
 
             result = {
                 "question_id": item["question_id"],
