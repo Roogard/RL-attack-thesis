@@ -49,7 +49,7 @@ This project evaluates and attacks memory systems in LLM-based conversational ag
 - Experiment tracking: (TBD — W&B or MLflow)
 
 ## Coding Conventions
-- User writes the code; Claude assists with planning, debugging, and review
+- Claude writes the code; user reviews, directs strategy, and makes design calls
 - Keep memory system implementations modular (swap-in/swap-out architecture)
 - Each memory variant should expose the same interface for fair comparison
 - Log retrieval traces for ablation analysis

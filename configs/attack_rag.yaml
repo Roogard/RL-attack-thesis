@@ -1,0 +1,35 @@
+# RL attacker training config — RAG victim.
+# Matches the design in plans/i-currently-have-most-optimized-lamport.md.
+
+# ── data ────────────────────────────────────────────────────────────────
+data_path: LongMemEval/data/longmemeval_s_cleaned.json
+split_path: configs/splits/rag_attack.json   # produced by scripts/make_split.py
+cache_path: results/caches/train_clean_cache.pkl
+
+# ── victim ──────────────────────────────────────────────────────────────
+architecture_name: "RAG with all-MiniLM-L6-v2 embedder, round-level chunks, top_k=10"
+domain: "a personal assistant that stores multi-session conversations with one user"
+embed_model: all-MiniLM-L6-v2
+top_k: 10
+answer_batch_size: 8
+
+# ── attacker ────────────────────────────────────────────────────────────
+attacker_model_id: Qwen/Qwen2.5-3B-Instruct
+lora_rank: 16
+memory_read_access: true            # false => blind-attacker ablation
+n_poison: 3                         # budget N (sweep 1,3,5,10 later)
+max_new_tokens: 768                 # per-session generation budget
+
+# ── training ────────────────────────────────────────────────────────────
+group_size: 16                      # G in GRPO (canonical; H200 has headroom)
+max_steps: 2000
+lr: 1.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+diversity_buffer_size: 512
+seed: 0
+
+# ── logging / checkpoints ───────────────────────────────────────────────
+output_dir: results/rl_attacker/rag_v1
+log_every: 10
+ckpt_every: 500

@@ -17,6 +17,9 @@ An RL-trained attacker can learn to generate poisoned conversation sessions that
 - Direct write access to the memory store (the key difference from pre-MINJA work)
 - Knowledge of the memory system's implementation details
 
+### Temporal-Leakage Caveat
+Each attacker-generated session is indexed with a `question_date` timestamp, which the attacker can observe (it is part of the conversation's metadata and visible through memory read-access). This means "query-blind" holds for *semantic* content but leaks along the *temporal* axis — an attacker can implicitly target "things that happened on/near date X" without seeing the query itself. Frame this in the thesis as: temporal context is part of domain knowledge, not query knowledge. The `*_abs` abstention and temporal-reasoning task types are where this caveat matters most and should be reported separately in ablations.
+
 ### Where This Sits
 
 | | Knows future queries | Doesn't know future queries |

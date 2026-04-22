@@ -15,7 +15,7 @@ git pull
 You write code and push from here. No venv needed unless you want to run things locally.
 
 ### Microway (SSH, one time only)
-
+### password: CiS11832
 ```bash
 ssh aroot@microway.cis.umassd.edu
 bash                                            # ensure you're in bash, not sh

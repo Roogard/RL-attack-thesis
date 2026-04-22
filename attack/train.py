@@ -1,0 +1,315 @@
+"""GRPO training entrypoint for the RL memory-poisoning attacker.
+
+Design: minimal custom GRPO loop over HF-transformers + peft. Each step:
+  1. Pick one question (cycling through clean_correct train set).
+  2. Sample G rollouts from the RolloutEnvironment.
+  3. Compute final group-normalized composite rewards.
+  4. Compute per-rollout advantage = R_i - mean(R).
+  5. Backprop policy gradient on sum of per-session token logprobs weighted by advantage.
+  6. Apply KL penalty vs. reference (frozen base) every K steps.
+
+Why custom and not trl/verifiers: at the time of writing, trl.GRPOTrainer
+assumes single-prompt-single-completion scalar rewards and doesn't naturally
+support the multi-turn observe-act-observe rollouts used here, while
+verifiers' multi-turn API has been moving. Writing the loop directly (~150
+lines) keeps us unblocked and debuggable.
+
+Usage:
+    python -m attack.train --config configs/attack_rag.yaml
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import os
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import yaml
+from tqdm import tqdm
+
+from attack.caches import CleanCache
+from attack.environment import RolloutEnvironment
+from attack.policy import AttackerPolicy
+from attack.probes import DOMAIN_PROBES
+
+
+def load_config(path: str) -> dict:
+    with io.open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def load_dataset(data_path: str, split_path: str, split: str) -> list[dict]:
+    with io.open(data_path, encoding="utf-8") as f:
+        all_qs = json.load(f)
+    lookup = {q["question_id"]: q for q in all_qs}
+    with io.open(split_path, encoding="utf-8") as f:
+        split_info = json.load(f)
+    if split == "all" and "all" not in split_info:
+        qids = split_info["train"] + split_info["val"] + split_info["test"]
+    else:
+        qids = split_info[split]
+    out = []
+    for qid in qids:
+        if qid in lookup:
+            q = lookup[qid]
+            q.setdefault("haystack_session_ids",
+                         [f"s{i}" for i in range(len(q["haystack_sessions"]))])
+            out.append(q)
+    return out
+
+
+def _recompute_logprobs_batched(policy: AttackerPolicy, rollouts: list) -> torch.Tensor:
+    """Per-rollout sum of session log-probs under the current policy (batched).
+
+    Returns a (G,) tensor with grad attached. Each entry is the sum of token
+    log-probs across all sessions in that rollout. Suitable for forming the
+    REINFORCE loss `-(advantage * logp_sum).mean()`.
+
+    Implementation: concatenate every (rollout, session) text into one padded
+    batch and run a single forward pass; then scatter-sum back to the rollout
+    granularity.
+    """
+    flat_texts: list[str] = []
+    rollout_idx: list[int] = []
+    for ri, r in enumerate(rollouts):
+        for sess in r.sessions:
+            if not sess.session or len(sess.session) == 0:
+                continue
+            text = sess.raw_text or ""
+            if not text.strip():
+                continue
+            flat_texts.append(text)
+            rollout_idx.append(ri)
+
+    if not flat_texts:
+        # Nothing to backprop on — return zero with grad to keep the loop alive.
+        return torch.zeros(len(rollouts), device=policy.device, requires_grad=True)
+
+    if policy.tokenizer.pad_token_id is None:
+        policy.tokenizer.pad_token = policy.tokenizer.eos_token
+    prev_side = policy.tokenizer.padding_side
+    policy.tokenizer.padding_side = "right"
+    try:
+        enc = policy.tokenizer(
+            flat_texts, return_tensors="pt", padding=True,
+            truncation=True, max_length=1024,
+        ).to(policy.device)
+    finally:
+        policy.tokenizer.padding_side = prev_side
+    ids = enc.input_ids
+    mask = enc.attention_mask
+
+    out = policy.model(ids, attention_mask=mask)
+    shift_logits = out.logits[:, :-1, :].float()
+    shift_labels = ids[:, 1:]
+    shift_mask = mask[:, 1:].float()
+
+    log_probs = torch.log_softmax(shift_logits, dim=-1)
+    label_lp = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)  # (B, T-1)
+    label_lp = label_lp * shift_mask
+    seq_logp = label_lp.sum(dim=1)  # (B,)
+
+    G = len(rollouts)
+    idx = torch.tensor(rollout_idx, device=policy.device, dtype=torch.long)
+    zeros = torch.zeros(G, device=policy.device, dtype=seq_logp.dtype)
+    return zeros.scatter_add(0, idx, seq_logp)
+
+
+def _save_checkpoint(out_dir: Path, step: int, policy: AttackerPolicy,
+                     optim: torch.optim.Optimizer, rng: random.Random):
+    ckpt_dir = out_dir / f"adapter_step_{step}"
+    policy.save_adapter(str(ckpt_dir))
+    state = {
+        "step": step,
+        "optim": optim.state_dict(),
+        "py_rng": rng.getstate(),
+        "torch_rng": torch.get_rng_state(),
+        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "numpy_rng": np.random.get_state(),
+    }
+    torch.save(state, ckpt_dir / "trainer_state.pt")
+    return ckpt_dir
+
+
+def _load_checkpoint(path: str, optim: torch.optim.Optimizer, rng: random.Random) -> int:
+    state_path = Path(path) / "trainer_state.pt"
+    if not state_path.exists():
+        raise FileNotFoundError(
+            f"No trainer_state.pt at {state_path} — was this checkpoint saved by "
+            "the new resumable trainer? Older adapter-only checkpoints can't resume."
+        )
+    state = torch.load(state_path, map_location="cpu")
+    optim.load_state_dict(state["optim"])
+    rng.setstate(state["py_rng"])
+    torch.set_rng_state(state["torch_rng"])
+    if state["cuda_rng"] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda_rng"])
+    np.random.set_state(state["numpy_rng"])
+    return int(state["step"])
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--overfit_one", action="store_true",
+                        help="Debug: overfit a single question (sanity check).")
+    parser.add_argument("--resume_from", default=None,
+                        help="Path to an adapter_step_N directory saved by a prior "
+                             "run. Restores LoRA weights, optimizer state, RNGs, "
+                             "and step counter — training continues from step N+1.")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+
+    # ── data & cache ─────────────────────────────────────────────────────
+    print("[train] loading train split ...")
+    train_qs = load_dataset(cfg["data_path"], cfg["split_path"], "train")
+    print(f"[train] {len(train_qs)} train questions")
+
+    cache_path = cfg["cache_path"]
+    if os.path.exists(cache_path):
+        print(f"[train] loading cache from {cache_path}")
+        cache = CleanCache.load(cache_path)
+    else:
+        print(f"[train] building cache -> {cache_path}")
+        cache = CleanCache.build(
+            train_qs,
+            embed_model_name=cfg["embed_model"],
+            top_k=cfg["top_k"],
+            answer_batch_size=cfg["answer_batch_size"],
+        )
+        cache.save(cache_path)
+    cache = cache.filter_clean_correct()
+    print(f"[train] cache has {len(cache)} clean_correct entries")
+
+    # ── policy ───────────────────────────────────────────────────────────
+    print("[train] initializing attacker policy ...")
+    policy = AttackerPolicy(
+        model_id=cfg["attacker_model_id"],
+        lora_adapter_path=args.resume_from,    # None on cold start
+        lora_rank=cfg["lora_rank"],
+    )
+
+    # ── embedder (shared with RAG) ───────────────────────────────────────
+    from sentence_transformers import SentenceTransformer
+    embedder = SentenceTransformer(cfg["embed_model"])
+
+    # ── environment ──────────────────────────────────────────────────────
+    probes = DOMAIN_PROBES if cfg.get("memory_read_access", True) else []
+    env = RolloutEnvironment(
+        cache=cache,
+        policy=policy,
+        embedder=embedder,
+        n_poison=cfg["n_poison"],
+        domain=cfg["domain"],
+        architecture_name=cfg["architecture_name"],
+        probes=probes,
+        top_k=cfg["top_k"],
+        diversity_buffer_size=cfg.get("diversity_buffer_size", 512),
+        max_new_tokens=cfg.get("max_new_tokens", 768),
+    )
+
+    # ── optimizer ────────────────────────────────────────────────────────
+    optim = torch.optim.AdamW(
+        (p for p in policy.model.parameters() if p.requires_grad),
+        lr=cfg["lr"],
+        weight_decay=cfg.get("weight_decay", 0.0),
+    )
+
+    # ── resume? ─────────────────────────────────────────────────────────
+    rng = random.Random(cfg.get("seed", 0))
+    start_step = 0
+    if args.resume_from:
+        start_step = _load_checkpoint(args.resume_from, optim, rng) + 1
+        print(f"[train] resumed from {args.resume_from}; starting at step {start_step}")
+
+    # ── training loop ────────────────────────────────────────────────────
+    out_dir = Path(cfg["output_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "train_log.jsonl"
+
+    train_qids = cache.qids()
+    if args.overfit_one:
+        train_qids = train_qids[:1]
+        print(f"[train] OVERFIT MODE — single qid={train_qids[0]}")
+
+    q_lookup = {q["question_id"]: q for q in train_qs}
+
+    max_steps = cfg["max_steps"]
+    group_size = cfg["group_size"]
+    log_every = cfg.get("log_every", 10)
+    ckpt_every = cfg.get("ckpt_every", 500)
+
+    log_mode = "a" if args.resume_from else "w"
+    with io.open(log_path, log_mode, encoding="utf-8") as logf:
+        for step in tqdm(range(start_step, max_steps), desc="train",
+                         initial=start_step, total=max_steps):
+            qid = rng.choice(train_qids)
+            question = q_lookup[qid]
+
+            policy.model.eval()
+            with torch.no_grad():
+                batch = env.sample_group(qid, question, group_size=group_size, step=step)
+
+            rewards = np.asarray(batch.final_rewards, dtype=np.float32)
+            baseline = rewards.mean()
+            advantages = rewards - baseline
+
+            policy.model.train()
+            optim.zero_grad(set_to_none=True)
+            adv_t = torch.tensor(advantages, device=policy.device, dtype=torch.float32)
+            logp_sums = _recompute_logprobs_batched(policy, batch.rollouts)  # (G,)
+            loss = -(adv_t * logp_sums).mean()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in policy.model.parameters() if p.requires_grad],
+                cfg.get("grad_clip", 1.0),
+            )
+            optim.step()
+
+            if step % log_every == 0:
+                n_flip = sum(
+                    r.component_scores.r_outcome > 0 for r in batch.rollouts
+                )
+                log = {
+                    "step": step,
+                    "qid": qid,
+                    "loss": float(loss.detach().cpu().item()),
+                    "reward_mean": float(rewards.mean()),
+                    "reward_max": float(rewards.max()),
+                    "r_outcome_mean": float(np.mean([r.component_scores.r_outcome for r in batch.rollouts])),
+                    "r_retrieval_mean": float(np.mean([r.component_scores.r_retrieval for r in batch.rollouts])),
+                    "r_answer_div_mean": float(np.mean([r.component_scores.r_answer_div for r in batch.rollouts])),
+                    "r_stealth_mean": float(np.mean([r.component_scores.r_stealth for r in batch.rollouts])),
+                    "flips_in_group": int(n_flip),
+                }
+                logf.write(json.dumps(log) + "\n")
+                logf.flush()
+                tqdm.write(f"  step={step} loss={log['loss']:.3f} R={log['reward_mean']:.3f} flips={n_flip}/{group_size}")
+
+            if step > 0 and step % ckpt_every == 0:
+                ckpt = _save_checkpoint(out_dir, step, policy, optim, rng)
+                tqdm.write(f"  [ckpt] saved {ckpt}")
+
+    final_ckpt = out_dir / "adapter_final"
+    policy.save_adapter(str(final_ckpt))
+    # Also save trainer_state at final so a future resume from final still works
+    torch.save({
+        "step": max_steps - 1,
+        "optim": optim.state_dict(),
+        "py_rng": rng.getstate(),
+        "torch_rng": torch.get_rng_state(),
+        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "numpy_rng": np.random.get_state(),
+    }, final_ckpt / "trainer_state.pt")
+    print(f"[train] done. final adapter -> {final_ckpt}")
+
+
+if __name__ == "__main__":
+    main()

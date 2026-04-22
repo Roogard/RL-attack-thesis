@@ -115,3 +115,11 @@ def run_eval(results_dir):
             row = f"{name:<20} {metrics['overall']:<10.4f} "
             row += " ".join(f"{metrics['per_task'].get(t, 'N/A'):<25}" for t in all_tasks)
             print(row)
+
+
+if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser(description="Judge prediction JSONLs in a results dir with GPT-4o.")
+    p.add_argument("--results-dir", required=True, help="Directory containing <memory>.jsonl prediction files")
+    args = p.parse_args()
+    run_eval(args.results_dir)
