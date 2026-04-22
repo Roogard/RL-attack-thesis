@@ -1,3 +1,5 @@
+import uuid
+
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
@@ -10,13 +12,18 @@ class RAGMemory(MemoryStore):
     Each user-assistant turn pair is embedded and stored as a separate chunk.
     Retrieval returns the top_k most semantically similar rounds, sorted
     chronologically for coherent context.
+
+    Note: chromadb.Client() is a process-singleton, so when the harness
+    creates B instances per batch we must give each a unique collection name
+    to avoid name collisions.
     """
 
     def __init__(self, model_name="all-MiniLM-L6-v2"):
+        self._collection_name = f"memory_{uuid.uuid4().hex}"
         self._ef = SentenceTransformerEmbeddingFunction(model_name=model_name)
         self._client = chromadb.Client()
         self._collection = self._client.create_collection(
-            name="memory", embedding_function=self._ef
+            name=self._collection_name, embedding_function=self._ef
         )
 
     def index(self, sessions, dates, session_ids):
@@ -75,7 +82,18 @@ class RAGMemory(MemoryStore):
         return "\n\n---\n\n".join(chunks)
 
     def clear(self):
-        self._client.delete_collection("memory")
+        try:
+            self._client.delete_collection(self._collection_name)
+        except Exception:
+            pass
         self._collection = self._client.create_collection(
-            name="memory", embedding_function=self._ef
+            name=self._collection_name, embedding_function=self._ef
         )
+
+    def __del__(self):
+        # Free chromadb's in-memory state for this instance — otherwise
+        # the singleton client accumulates orphaned collections all run.
+        try:
+            self._client.delete_collection(self._collection_name)
+        except Exception:
+            pass
