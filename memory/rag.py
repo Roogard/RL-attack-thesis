@@ -20,10 +20,7 @@ class RAGMemory(MemoryStore):
 
     def __init__(self, model_name="all-MiniLM-L6-v2"):
         self._collection_name = f"memory_{uuid.uuid4().hex}"
-        # device="cpu" avoids initializing CUDA in the parent process,
-        # which would otherwise corrupt the CUDA state that vLLM's
-        # answer-engine subprocess tries to initialize on first ask_qwen_batch.
-        self._ef = SentenceTransformerEmbeddingFunction(model_name=model_name, device="cpu")
+        self._ef = SentenceTransformerEmbeddingFunction(model_name=model_name)
         self._client = chromadb.Client()
         self._collection = self._client.create_collection(
             name=self._collection_name, embedding_function=self._ef

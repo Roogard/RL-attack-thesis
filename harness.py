@@ -197,6 +197,13 @@ def run_questions(data, memory_factory, output_path, batch_size=16, limit=None):
     questions = data[:limit] if limit else data
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+    # Pre-load the answer engine BEFORE any memory factory runs. Some
+    # memory backends (RAGMemory's chromadb embedder) initialize CUDA in
+    # the parent process, which corrupts vLLM's subprocess CUDA init.
+    # Spawning vLLM first establishes a clean subprocess CUDA context;
+    # the parent can then init its own CUDA freely without conflict.
+    _vllm_engines.get_answer_engine()
+
     with open(output_path, "w", encoding="utf-8") as out_f:
         for batch_start in tqdm(
             range(0, len(questions), batch_size),
