@@ -1,0 +1,42 @@
+# RL attacker training config — RAG victim, gradient-flow experiment.
+# Same as attack_rag.yaml except:
+#   - lr:        1e-5 -> 5e-5   (5x, to move LoRA weights faster)
+#   - lora_rank: 16   -> 32     (2x capacity, larger update space)
+#   - output_dir: distinct so run v1 and v2 can coexist on disk
+#
+# Hypothesis: the overfit's flat r_retrieval signal was a gradient-flow
+# problem (small LR + sparse REINFORCE advantages + small adapter).
+# Diverging this run's r_retrieval from v1's confirms the cause.
+
+# ── data ────────────────────────────────────────────────────────────────
+data_path: LongMemEval/data/longmemeval_s_cleaned.json
+split_path: configs/splits/rag_attack.json
+cache_path: results/caches/train_clean_cache.pkl
+
+# ── victim ──────────────────────────────────────────────────────────────
+architecture_name: "RAG with all-MiniLM-L6-v2 embedder, round-level chunks, top_k=10"
+domain: "a personal assistant that stores multi-session conversations with one user"
+embed_model: all-MiniLM-L6-v2
+top_k: 10
+answer_batch_size: 8
+
+# ── attacker ────────────────────────────────────────────────────────────
+attacker_model_id: Qwen/Qwen2.5-3B-Instruct
+lora_rank: 32                       # v2 change: was 16
+memory_read_access: true
+n_poison: 3
+max_new_tokens: 768
+
+# ── training ────────────────────────────────────────────────────────────
+group_size: 16
+max_steps: 2000
+lr: 5.0e-5                          # v2 change: was 1.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+diversity_buffer_size: 512
+seed: 0
+
+# ── logging / checkpoints ───────────────────────────────────────────────
+output_dir: results/rl_attacker/rag_v2
+log_every: 10
+ckpt_every: 500

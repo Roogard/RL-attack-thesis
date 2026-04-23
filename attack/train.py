@@ -205,10 +205,14 @@ def main():
 
     # ── policy ───────────────────────────────────────────────────────────
     print("[train] initializing attacker policy ...")
+    # Scope the vLLM LoRA cache dir to this run so parallel trainings
+    # on different configs don't overwrite each other's adapter-on-disk.
+    vllm_lora_cache_dir = os.path.join(cfg["output_dir"], "vllm_lora_cache")
     policy = AttackerPolicy(
         model_id=cfg["attacker_model_id"],
         lora_adapter_path=args.resume_from,    # None on cold start
         lora_rank=cfg["lora_rank"],
+        vllm_lora_cache_dir=vllm_lora_cache_dir,
     )
 
     # ── embedder (shared with RAG) ───────────────────────────────────────
