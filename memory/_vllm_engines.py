@@ -110,9 +110,14 @@ def get_attacker_engine(max_lora_rank: int = 16):
                     f"[vllm] Loading {_ATTACKER_MODEL_ID} "
                     f"(attacker, LoRA-enabled, util={_ATTACKER_GPU_MEM_UTIL}) ..."
                 )
+                # 16384 fits the 8-probe × 3-chunk memory readout (~5k tokens)
+                # plus prior-session summaries and the generated response with
+                # safe margin. Qwen2.5-3B supports 32k natively; we stop at
+                # 16k so the KV cache budget stays generous enough for group
+                # batching at util=0.15.
                 _attacker_engine = _build_engine(
                     _ATTACKER_MODEL_ID,
-                    max_model_len=4096,
+                    max_model_len=16384,
                     enable_prefix_caching=True,
                     gpu_memory_utilization=_ATTACKER_GPU_MEM_UTIL,
                     enable_lora=True,
