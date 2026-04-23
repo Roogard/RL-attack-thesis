@@ -65,16 +65,26 @@ def load_dataset(data_path: str, split_path: str, split: str) -> list[dict]:
     return out
 
 
-def _recompute_logprobs_batched(policy: AttackerPolicy, rollouts: list) -> torch.Tensor:
-    """Per-rollout sum of session log-probs under the current policy (batched).
+def _chunked_policy_gradient_step(
+    policy: AttackerPolicy,
+    rollouts: list,
+    advantages: np.ndarray,
+    chunk_size: int,
+) -> float:
+    """Chunked forward+backward for the REINFORCE policy gradient.
 
-    Returns a (G,) tensor with grad attached. Each entry is the sum of token
-    log-probs across all sessions in that rollout. Suitable for forming the
-    REINFORCE loss `-(advantage * logp_sum).mean()`.
+    The monolithic version (single forward of all group_size * n_poison
+    sessions, then one loss.backward) peaks activation memory well past
+    what fits on a single GPU when two vLLM engines + a 7B judge + the
+    attacker model all share it. This version processes up to
+    `chunk_size` sequences per forward, calls backward per chunk, and
+    lets gradients accumulate in the LoRA parameters. Mathematically
+    identical to the monolithic version thanks to the linearity of
+    the loss:  loss = -sum_seq(adv[rollout(seq)] * logp(seq)) / G.
 
-    Implementation: concatenate every (rollout, session) text into one padded
-    batch and run a single forward pass; then scatter-sum back to the rollout
-    granularity.
+    Returns the scalar loss value (for logging). Callers should call
+    optim.step() after this returns; grad accumulation leaves the
+    aggregate gradient ready to apply.
     """
     flat_texts: list[str] = []
     rollout_idx: list[int] = []
@@ -88,9 +98,9 @@ def _recompute_logprobs_batched(policy: AttackerPolicy, rollouts: list) -> torch
             flat_texts.append(text)
             rollout_idx.append(ri)
 
+    G = len(rollouts)
     if not flat_texts:
-        # Nothing to backprop on — return zero with grad to keep the loop alive.
-        return torch.zeros(len(rollouts), device=policy.device, requires_grad=True)
+        return 0.0
 
     if policy.tokenizer.pad_token_id is None:
         policy.tokenizer.pad_token = policy.tokenizer.eos_token
@@ -100,26 +110,38 @@ def _recompute_logprobs_batched(policy: AttackerPolicy, rollouts: list) -> torch
         enc = policy.tokenizer(
             flat_texts, return_tensors="pt", padding=True,
             truncation=True, max_length=1024,
-        ).to(policy.device)
+        )
     finally:
         policy.tokenizer.padding_side = prev_side
-    ids = enc.input_ids
-    mask = enc.attention_mask
 
-    out = policy.model(ids, attention_mask=mask)
-    shift_logits = out.logits[:, :-1, :].float()
-    shift_labels = ids[:, 1:]
-    shift_mask = mask[:, 1:].float()
+    adv_tensor = torch.tensor(advantages, device=policy.device, dtype=torch.float32)
+    rollout_idx_tensor = torch.tensor(
+        rollout_idx, device=policy.device, dtype=torch.long
+    )
 
-    log_probs = torch.log_softmax(shift_logits, dim=-1)
-    label_lp = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)  # (B, T-1)
-    label_lp = label_lp * shift_mask
-    seq_logp = label_lp.sum(dim=1)  # (B,)
+    N = len(flat_texts)
+    total_loss = 0.0
+    for start in range(0, N, chunk_size):
+        end = min(start + chunk_size, N)
+        ids = enc.input_ids[start:end].to(policy.device)
+        mask = enc.attention_mask[start:end].to(policy.device)
 
-    G = len(rollouts)
-    idx = torch.tensor(rollout_idx, device=policy.device, dtype=torch.long)
-    zeros = torch.zeros(G, device=policy.device, dtype=seq_logp.dtype)
-    return zeros.scatter_add(0, idx, seq_logp)
+        out = policy.model(ids, attention_mask=mask)
+        shift_logits = out.logits[:, :-1, :].float()
+        shift_labels = ids[:, 1:]
+        shift_mask = mask[:, 1:].float()
+
+        log_probs = torch.log_softmax(shift_logits, dim=-1)
+        label_lp = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+        label_lp = label_lp * shift_mask
+        seq_logp = label_lp.sum(dim=1)  # (chunk,)
+
+        chunk_adv = adv_tensor[rollout_idx_tensor[start:end]]
+        chunk_loss = -(chunk_adv * seq_logp).sum() / G
+        chunk_loss.backward()
+        total_loss += float(chunk_loss.detach().cpu().item())
+
+    return total_loss
 
 
 def _save_checkpoint(out_dir: Path, step: int, policy: AttackerPolicy,
@@ -308,10 +330,13 @@ def main():
             )
             policy.model.train()
             optim.zero_grad(set_to_none=True)
-            adv_t = torch.tensor(advantages, device=policy.device, dtype=torch.float32)
-            logp_sums = _recompute_logprobs_batched(policy, batch.rollouts)  # (G,)
-            loss = -(adv_t * logp_sums).mean()
-            loss.backward()
+            # Chunked forward+backward keeps peak activation memory to
+            # chunk_size sequences through the 3B attacker. Override the
+            # default via LOGPROB_CHUNK_SIZE if you need to tune.
+            chunk_size = int(os.environ.get("LOGPROB_CHUNK_SIZE", "8"))
+            loss_val = _chunked_policy_gradient_step(
+                policy, batch.rollouts, advantages, chunk_size=chunk_size
+            )
             torch.nn.utils.clip_grad_norm_(
                 [p for p in policy.model.parameters() if p.requires_grad],
                 cfg.get("grad_clip", 1.0),
@@ -327,7 +352,7 @@ def main():
                 log = {
                     "step": step,
                     "qid": qid,
-                    "loss": float(loss.detach().cpu().item()),
+                    "loss": loss_val,
                     "reward_mean": float(rewards.mean()),
                     "reward_max": float(rewards.max()),
                     "r_outcome_mean": float(np.mean([r.component_scores.r_outcome for r in batch.rollouts])),
