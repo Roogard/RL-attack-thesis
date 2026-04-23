@@ -43,12 +43,27 @@ def _get_judge_model():
             if _judge_model is None:
                 import torch
                 from transformers import AutoModelForCausalLM, AutoTokenizer
-                print(f"[harness] Loading local judge model {_JUDGE_MODEL_ID} ...")
+                # JUDGE_DEVICE lets us pin the 7B judge to a different GPU
+                # than the one running the attacker HF model + vLLM engines.
+                # For a single-GPU run leave it unset ("auto" falls back to
+                # whichever GPU HF picks, which is cuda:0 under
+                # CUDA_VISIBLE_DEVICES=0). For multi-GPU (e.g. attacker on
+                # cuda:0, judge on cuda:1), set JUDGE_DEVICE=cuda:1 and
+                # launch with CUDA_VISIBLE_DEVICES=0,1.
+                device_map_env = os.environ.get("JUDGE_DEVICE", "auto")
+                if device_map_env == "auto":
+                    device_map: object = "auto"
+                else:
+                    device_map = {"": device_map_env}
+                print(
+                    f"[harness] Loading local judge model {_JUDGE_MODEL_ID} "
+                    f"on device_map={device_map} ..."
+                )
                 _judge_tokenizer = AutoTokenizer.from_pretrained(_JUDGE_MODEL_ID)
                 _judge_model = AutoModelForCausalLM.from_pretrained(
                     _JUDGE_MODEL_ID,
                     torch_dtype=torch.bfloat16,
-                    device_map="auto",
+                    device_map=device_map,
                 )
                 _judge_model.eval()
                 print("[harness] Local judge model loaded.")

@@ -27,6 +27,7 @@ import os
 import random
 import time
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -163,6 +164,11 @@ def main():
                         help="Path to an adapter_step_N directory saved by a prior "
                              "run. Restores LoRA weights, optimizer state, RNGs, "
                              "and step counter — training continues from step N+1.")
+    parser.add_argument("--max_hours", type=float, default=None,
+                        help="Graceful stop: save a resumable checkpoint and exit "
+                             "once wall time exceeds this many hours. Use slightly "
+                             "below your true budget (e.g. 7.5 for an 8h window) so "
+                             "the final checkpoint save has time to finish.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -260,9 +266,22 @@ def main():
     ckpt_every = cfg.get("ckpt_every", 500)
 
     log_mode = "a" if args.resume_from else "w"
+    deadline_seconds = args.max_hours * 3600 if args.max_hours else None
+    start_wall = time.time()
+    stopped_early_at: Optional[int] = None
     with io.open(log_path, log_mode, encoding="utf-8") as logf:
         for step in tqdm(range(start_step, max_steps), desc="train",
                          initial=start_step, total=max_steps):
+            if deadline_seconds is not None and (time.time() - start_wall) > deadline_seconds:
+                tqdm.write(
+                    f"[train] --max_hours={args.max_hours} reached "
+                    f"(elapsed {(time.time() - start_wall)/3600:.2f}h). "
+                    f"Saving resumable checkpoint at step {step} and stopping."
+                )
+                ckpt = _save_checkpoint(out_dir, step, policy, optim, rng)
+                tqdm.write(f"  [ckpt] saved {ckpt}")
+                stopped_early_at = step
+                break
             qid = rng.choice(train_qids)
             question = q_lookup[qid]
 
@@ -321,18 +340,23 @@ def main():
                 ckpt = _save_checkpoint(out_dir, step, policy, optim, rng)
                 tqdm.write(f"  [ckpt] saved {ckpt}")
 
-    final_ckpt = out_dir / "adapter_final"
-    policy.save_adapter(str(final_ckpt))
-    # Also save trainer_state at final so a future resume from final still works
-    torch.save({
-        "step": max_steps - 1,
-        "optim": optim.state_dict(),
-        "py_rng": rng.getstate(),
-        "torch_rng": torch.get_rng_state(),
-        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        "numpy_rng": np.random.get_state(),
-    }, final_ckpt / "trainer_state.pt")
-    print(f"[train] done. final adapter -> {final_ckpt}")
+    if stopped_early_at is not None:
+        print(
+            f"[train] stopped early at step {stopped_early_at} due to --max_hours; "
+            f"resume with --resume_from {out_dir}/adapter_step_{stopped_early_at}"
+        )
+    else:
+        final_ckpt = out_dir / "adapter_final"
+        policy.save_adapter(str(final_ckpt))
+        torch.save({
+            "step": max_steps - 1,
+            "optim": optim.state_dict(),
+            "py_rng": rng.getstate(),
+            "torch_rng": torch.get_rng_state(),
+            "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy_rng": np.random.get_state(),
+        }, final_ckpt / "trainer_state.pt")
+        print(f"[train] done. final adapter -> {final_ckpt}")
 
 
 if __name__ == "__main__":
