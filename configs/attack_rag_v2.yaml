@@ -28,7 +28,7 @@ n_poison: 3
 max_new_tokens: 768
 
 # ── training ────────────────────────────────────────────────────────────
-group_size: 16
+group_size: 8                       # matched to v1; rank=32 leaves less activation headroom than rank=16
 max_steps: 2000
 lr: 5.0e-5                          # v2 change: was 1.0e-5
 weight_decay: 0.0
