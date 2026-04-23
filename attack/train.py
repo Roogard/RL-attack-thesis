@@ -167,14 +167,14 @@ def main():
 
     cfg = load_config(args.config)
 
-    # Pre-load the vLLM answer engine BEFORE any HF model touches CUDA in
-    # this process. Same root cause as harness.run_questions: once the
-    # parent has CUDA state, vLLM's forked EngineCore subprocess fails to
-    # init. CleanCache.build implicitly does this preload via
-    # ask_qwen_batch, but when the cache hits disk (common path) nothing
-    # else loads the engine before AttackerPolicy — first rollout crashes.
+    # Pre-load BOTH vLLM engines (answer + attacker) BEFORE any HF model
+    # touches CUDA in this process. Once the parent has CUDA state,
+    # vLLM's forked EngineCore subprocess fails to init. The attacker
+    # engine is the rollout-generation path (LoRA hot-swapped by
+    # sync_lora_to_vllm); the answer engine is the victim answer path.
     from memory import _vllm_engines
     _vllm_engines.get_answer_engine()
+    _vllm_engines.get_attacker_engine(max_lora_rank=cfg["lora_rank"])
 
     # ── data & cache ─────────────────────────────────────────────────────
     print("[train] loading train split ...")
@@ -238,6 +238,10 @@ def main():
         start_step = _load_checkpoint(args.resume_from, optim, rng) + 1
         print(f"[train] resumed from {args.resume_from}; starting at step {start_step}")
 
+    # Push the initial (or resumed) LoRA weights to vLLM so the first
+    # rollout samples from the correct distribution.
+    policy.sync_lora_to_vllm()
+
     # ── training loop ────────────────────────────────────────────────────
     out_dir = Path(cfg["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -290,6 +294,8 @@ def main():
                 cfg.get("grad_clip", 1.0),
             )
             optim.step()
+            # Sync the updated LoRA to vLLM so the NEXT rollout is on-policy.
+            policy.sync_lora_to_vllm()
 
             if step % log_every == 0:
                 n_flip = sum(

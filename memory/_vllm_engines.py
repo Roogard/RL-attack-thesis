@@ -21,11 +21,15 @@ from typing import Any
 
 _MEM_MODEL_ID = "driaforall/mem-agent"
 _ANSWER_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
+_ATTACKER_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
 # Override with VLLM_GPU_MEM_UTIL=0.25 etc. when sharing a GPU with other
 # jobs or when the training-time HF models (AttackerPolicy + 7B judge +
 # activations) need more headroom on the same device.
 _GPU_MEM_UTIL = float(os.environ.get("VLLM_GPU_MEM_UTIL", "0.40"))
+# Separate knob for the attacker engine — it holds short prompts so it can
+# run with a tighter KV cache budget than the answer engine.
+_ATTACKER_GPU_MEM_UTIL = float(os.environ.get("VLLM_ATTACKER_GPU_MEM_UTIL", "0.15"))
 
 _mem_engine = None
 _mem_tokenizer = None
@@ -35,18 +39,28 @@ _answer_engine = None
 _answer_tokenizer = None
 _answer_lock = threading.Lock()
 
+_attacker_engine = None
+_attacker_tokenizer = None
+_attacker_lock = threading.Lock()
+
 
 def _build_engine(
     model_id: str,
     max_model_len: int,
     enable_prefix_caching: bool,
     hf_overrides: dict | None = None,
+    gpu_memory_utilization: float | None = None,
+    enable_lora: bool = False,
+    max_lora_rank: int = 16,
+    max_loras: int = 1,
 ):
     from vllm import LLM
     kwargs: dict[str, Any] = {
         "model": model_id,
         "dtype": "bfloat16",
-        "gpu_memory_utilization": _GPU_MEM_UTIL,
+        "gpu_memory_utilization": (
+            gpu_memory_utilization if gpu_memory_utilization is not None else _GPU_MEM_UTIL
+        ),
         "enable_prefix_caching": enable_prefix_caching,
         "max_model_len": max_model_len,
         "trust_remote_code": True,
@@ -54,6 +68,10 @@ def _build_engine(
     }
     if hf_overrides is not None:
         kwargs["hf_overrides"] = hf_overrides
+    if enable_lora:
+        kwargs["enable_lora"] = True
+        kwargs["max_lora_rank"] = max_lora_rank
+        kwargs["max_loras"] = max_loras
     return LLM(**kwargs)
 
 
@@ -73,6 +91,37 @@ def get_mem_engine():
                 _mem_tokenizer = AutoTokenizer.from_pretrained(_MEM_MODEL_ID)
                 print("[vllm] mem-agent ready.")
     return _mem_engine, _mem_tokenizer
+
+
+def get_attacker_engine(max_lora_rank: int = 16):
+    """Return (engine, tokenizer) for the attacker model (3B + LoRA). Lazy + cached.
+
+    Separate engine from the answer model because we want LoRA support and
+    independent sampling. The training loop saves the current LoRA adapter
+    to disk after every optim.step() and passes a fresh LoRARequest (new
+    int_id) so vLLM reloads the updated weights on the next rollout.
+    """
+    global _attacker_engine, _attacker_tokenizer
+    if _attacker_engine is None:
+        with _attacker_lock:
+            if _attacker_engine is None:
+                from transformers import AutoTokenizer
+                print(
+                    f"[vllm] Loading {_ATTACKER_MODEL_ID} "
+                    f"(attacker, LoRA-enabled, util={_ATTACKER_GPU_MEM_UTIL}) ..."
+                )
+                _attacker_engine = _build_engine(
+                    _ATTACKER_MODEL_ID,
+                    max_model_len=4096,
+                    enable_prefix_caching=True,
+                    gpu_memory_utilization=_ATTACKER_GPU_MEM_UTIL,
+                    enable_lora=True,
+                    max_lora_rank=max_lora_rank,
+                    max_loras=1,
+                )
+                _attacker_tokenizer = AutoTokenizer.from_pretrained(_ATTACKER_MODEL_ID)
+                print("[vllm] attacker engine ready.")
+    return _attacker_engine, _attacker_tokenizer
 
 
 def get_answer_engine():

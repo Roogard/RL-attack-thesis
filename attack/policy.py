@@ -4,17 +4,23 @@ Generates one poisoned session (a list of {role, content} turns) per call.
 The rollout loop drives N autoregressive calls, feeding the updated memory
 read-out as context between calls.
 
-Implementation choice: HF `transformers` + `peft` (not vLLM-LoRA-hot-swap),
-per plan risk mitigation #3. vLLM LoRA swap is faster per-step but the
-swap cost at GRPO group boundaries was flagged as likely dominant; HF
-generation on a 3B model with short (~400 token) outputs is acceptable
-and keeps the training loop simple. Can be swapped to vLLM later without
-changing the public interface.
+Implementation: HF `transformers` + `peft` owns the weights (backward pass
+lives here), and vLLM generates rollouts with hot-swapped LoRA adapters.
+After every optim.step() in the training loop, the parent calls
+`sync_lora_to_vllm()` which saves the current LoRA to disk and bumps a
+counter; the next `generate_session_batch` builds a fresh LoRARequest
+with the new int_id so vLLM reloads the updated weights before sampling.
+
+The gradient is computed from `_recompute_logprobs_batched` which runs
+the HF model in training mode, so vLLM's sampling logprobs do NOT enter
+the loss — we only need the session texts from vLLM.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 from dataclasses import dataclass
 from typing import Optional
 
@@ -152,13 +158,21 @@ class AttackerPolicy:
         lora_rank: int = 16,
         device: Optional[str] = None,
         dtype: torch.dtype = torch.bfloat16,
+        vllm_lora_cache_dir: str = "results/vllm_lora_cache",
     ):
         from transformers import AutoModelForCausalLM, AutoTokenizer
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._lora_rank = lora_rank
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id, torch_dtype=dtype, device_map=self.device
         )
+        # vLLM LoRA sync state. sync_lora_to_vllm() bumps the counter and
+        # writes the adapter to disk; generate_session_batch() picks it up
+        # via a fresh LoRARequest with the incremented int_id.
+        self._vllm_lora_cache_dir = vllm_lora_cache_dir
+        self._lora_sync_counter = 0
+        self._current_lora_path: Optional[str] = None
         # Gradient checkpointing is required — the logprob-recompute forward
         # pass covers (group_size * n_poison) sessions of up to 1024 tokens
         # through a 3B model with grads, which otherwise spikes activation
@@ -199,6 +213,29 @@ class AttackerPolicy:
         assert self._lora_attached, "no LoRA attached"
         self.model.save_pretrained(path)
 
+    def sync_lora_to_vllm(self) -> None:
+        """Persist the current LoRA to disk and bump the vLLM reload counter.
+
+        Called by the training loop after every optim.step() (and once
+        before the first rollout) so that vLLM's attacker engine picks up
+        fresh weights on the next generate_session_batch call via a
+        LoRARequest with a new int_id.
+        """
+        assert self._lora_attached, "no LoRA attached — nothing to sync"
+        self._lora_sync_counter += 1
+        new_path = os.path.join(
+            self._vllm_lora_cache_dir, f"step_{self._lora_sync_counter}"
+        )
+        os.makedirs(self._vllm_lora_cache_dir, exist_ok=True)
+        if os.path.exists(new_path):
+            shutil.rmtree(new_path)
+        self.save_adapter(new_path)
+        # Clean up the previous cached adapter to keep disk usage bounded.
+        prev = self._current_lora_path
+        if prev and prev != new_path and os.path.exists(prev):
+            shutil.rmtree(prev, ignore_errors=True)
+        self._current_lora_path = new_path
+
     def generate_session(
         self,
         domain: str,
@@ -237,77 +274,62 @@ class AttackerPolicy:
         top_p: float = 0.95,
         max_retries: int = 2,
     ) -> list[GenerationResult]:
-        """Generate G sessions in one batched HF call.
+        """Generate G sessions via vLLM with hot-swapped LoRA.
 
         Each entry in `prompts_data` is a dict with the same keyword args as
         `generate_session`. Returns one `GenerationResult` per entry.
 
-        Failed JSON parses are retried per-sample (single-prompt call) up to
-        `max_retries` times, so the batch path stays fast on the common case.
+        The training loop must have called `sync_lora_to_vllm()` at least
+        once before this; each sync bumps the LoRA int_id so vLLM reloads
+        the updated weights on the next generate call. Token logprobs are
+        NOT captured here — the gradient path uses
+        `_recompute_logprobs_batched` (HF with grads) so vLLM's sampling
+        logprobs do not enter the loss.
+
+        Failed JSON parses are retried per-sample (single-prompt call) up
+        to `max_retries` times.
         """
         if not prompts_data:
             return []
 
-        # Build all chat prompts
+        from memory import _vllm_engines
+        from vllm import SamplingParams
+        from vllm.lora.request import LoRARequest
+
+        engine, tokenizer = _vllm_engines.get_attacker_engine(
+            max_lora_rank=self._lora_rank
+        )
+
         messages_list = [_build_attacker_prompt(**pd) for pd in prompts_data]
         prompt_texts = [
-            self.tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
+            tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
             for m in messages_list
         ]
 
-        # Left-pad for causal LM batched generation
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        prev_padding_side = self.tokenizer.padding_side
-        self.tokenizer.padding_side = "left"
-        try:
-            enc = self.tokenizer(prompt_texts, return_tensors="pt", padding=True).to(self.device)
-        finally:
-            self.tokenizer.padding_side = prev_padding_side
-        input_ids = enc.input_ids
-        attention_mask = enc.attention_mask
-        input_len = input_ids.shape[1]
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_new_tokens,
+        )
 
-        with torch.no_grad():
-            out = self.model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-                return_dict_in_generate=True,
-                output_scores=True,
-                pad_token_id=self.tokenizer.pad_token_id,
+        lora_request: Optional[LoRARequest] = None
+        if self._lora_attached and self._current_lora_path is not None:
+            lora_request = LoRARequest(
+                lora_name=f"attacker_step_{self._lora_sync_counter}",
+                lora_int_id=self._lora_sync_counter,
+                lora_path=self._current_lora_path,
             )
 
-        T = len(out.scores) if out.scores else 0
-        gen_seqs = out.sequences[:, input_len:input_len + T] if T > 0 \
-            else out.sequences[:, input_len:]
-        B = gen_seqs.shape[0]
+        outputs = engine.generate(
+            prompt_texts,
+            sampling_params,
+            lora_request=lora_request,
+            use_tqdm=False,
+        )
 
-        # Per-token log-probs without materializing the (T, B, V) tensor.
-        if T > 0:
-            token_logprobs_full = torch.zeros(B, T, device=self.device, dtype=torch.float32)
-            for t in range(T):
-                step_logp = torch.log_softmax(out.scores[t].float(), dim=-1)  # (B, V)
-                token_logprobs_full[:, t] = step_logp.gather(1, gen_seqs[:, t:t+1]).squeeze(-1)
-        else:
-            token_logprobs_full = None
-
-        eos_id = self.tokenizer.eos_token_id
         results: list[GenerationResult] = []
-        for b in range(B):
-            seq = gen_seqs[b]
-            if eos_id is not None:
-                eos_pos = (seq == eos_id).nonzero(as_tuple=False)
-                seq_len = (eos_pos[0].item() + 1) if len(eos_pos) > 0 else seq.shape[0]
-            else:
-                seq_len = seq.shape[0]
-            seq_clean = seq[:seq_len]
-            raw_text = self.tokenizer.decode(seq_clean, skip_special_tokens=True)
-            tlp = token_logprobs_full[b, :seq_len].detach().cpu() if token_logprobs_full is not None else None
-
+        for out in outputs:
+            raw_text = out.outputs[0].text
             try:
                 session = _parse_session_json(raw_text)
             except Exception:
@@ -315,12 +337,10 @@ class AttackerPolicy:
             results.append(GenerationResult(
                 session=session,
                 raw_text=raw_text,
-                token_logprobs=tlp,
-                token_ids=seq_clean.detach().cpu(),
+                token_logprobs=None,
+                token_ids=None,
             ))
 
-        # Retry empties single-prompt (uses temperature, top_p) — cheaper than
-        # re-running the full batch.
         if max_retries > 0:
             for i, r in enumerate(results):
                 if r.session:
@@ -331,7 +351,7 @@ class AttackerPolicy:
                         max_new_tokens=max_new_tokens,
                         temperature=temperature,
                         top_p=top_p,
-                        max_retries=0,  # avoid recursion blow-up
+                        max_retries=0,
                     )
                     if retry and retry[0].session:
                         results[i] = retry[0]
