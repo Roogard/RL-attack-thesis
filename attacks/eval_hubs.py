@@ -336,14 +336,17 @@ def main():
         # In oracle mode H is built per-qid inside the loop; still record K list.
         hubs_by_K = {K: None for K in args.K_values}  # type: ignore[dict-item]
 
-    # Hub documents vary per payload and per K but are fixed across eval questions
-    # (architecture-wide in global mode; re-drawn with same seed per K in oracle mode).
-    hub_docs_cache: dict[tuple[int, str], list[str]] = {}
-    for K in hubs_by_K:
-        for payload in args.payloads:
-            hub_docs_cache[(K, payload)] = _make_hub_documents(K, payload, np.random.default_rng(args.seed + K))
+    # Hub documents + vector-mode config_keys only apply outside poison-file
+    # mode. In poison-file mode config_keys was already set to a single
+    # ("text", stem) tuple above; clobbering it here was the bug that made
+    # Stage B evals run only the clean path.
+    if not args.poison_file:
+        hub_docs_cache: dict[tuple[int, str], list[str]] = {}
+        for K in hubs_by_K:
+            for payload in args.payloads:
+                hub_docs_cache[(K, payload)] = _make_hub_documents(K, payload, np.random.default_rng(args.seed + K))
 
-    config_keys: list[tuple[int, str]] = [(K, p) for K in sorted(hubs_by_K) for p in args.payloads]
+        config_keys: list[tuple[int, str]] = [(K, p) for K in sorted(hubs_by_K) for p in args.payloads]
 
     # ── Diagnostic: decoupling gap between hub vectors and their payload text.
     # In vector-mode we pick hub vector and payload text independently; a
@@ -352,7 +355,7 @@ def main():
     # how much of a privilege we're exercising. High cos = payload text is
     # naturally hub-like; low cos = we're cheating.
     decoupling_cos: dict[str, dict] = {}
-    if args.hub_scope == "global":
+    if args.hub_scope == "global" and not args.poison_file:
         for (K, payload) in config_keys:
             docs = hub_docs_cache[(K, payload)]
             H = hubs_by_K[K]
