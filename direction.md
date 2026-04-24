@@ -1,8 +1,18 @@
-# Research Direction: RL-Trained Adversarial Memory Poisoning
+# Research Direction: Adversarial Hubness Attacks on Memory-Augmented LLMs
 
-## Core Thesis
+> **Pivot note (April 2026):** the project pivoted from an RL-trained text-generation attacker (still under [attack/](attack/)) to a geometric hubness attack ([attacks/](attacks/)). The threat model and phasing below are updated; the legacy RL framing is preserved in the "Previous direction" section at the bottom for context. The current engineering spec is [ATTACK.md](ATTACK.md).
 
-An RL-trained attacker can learn to generate poisoned conversation sessions that degrade an LLM agent's memory-dependent performance — without knowing what questions the agent will be asked. The attacker knows the domain (e.g., "this agent handles multi-session personal conversations") and can observe stored memories, but has no access to downstream evaluation queries.
+## Core Thesis (revised)
+
+A query-blind attacker with memory read access can inject a small number of synthetic hub vectors into a memory-augmented LLM's retrieval index such that the vectors are retrieved for arbitrary unseen queries. When the contaminated context reaches the answer model, the memory system's **confident-answer rate** drops sharply — the attacked agent refuses to answer or hallucinates at much higher rates than the clean baseline. The attack targets the utility of the memory, not only the accuracy of any single answer: a memory system that abstains on half of user questions is functionally broken even if its raw accuracy partially survives via coerced correct-refusals on unanswerable questions.
+
+## Primary metric: confident-answer rate
+
+Traditional RAG attack literature reports accuracy drops. LongMemEval (our benchmark) mixes two question classes:
+- **Recall** questions: "what did I say about X?" — abstention is a wrong answer.
+- **Abstention** questions (`_abs` suffix): "did we ever discuss Y?" where Y was not discussed — abstention is a correct answer.
+
+An attack that pushes the model toward abstention gets paradoxical credit on the abstention bucket, so *overall* accuracy drop is a weak signal. The attacker's real figure of merit is **confident-answer rate** = `1 − P(model abstains)`. This captures both attack success modes the attacker cares about — induced abstention and induced hallucination — as "memory did not give a confident correct answer." Recall-only accuracy drop is reported alongside as a secondary sanity check.
 
 ## Threat Model
 
@@ -27,16 +37,19 @@ Each attacker-generated session is indexed with a `question_date` timestamp, whi
 | **Has memory read access** | (overpowered) | **This work** |
 | **No memory access** | MINJA | Blind attack (ablation) |
 
-## Approach
+## Approach (revised)
 
-### Training the Attacker
-- **Policy**: A local LLM (small enough for university cluster) serves as the attacker
-- **Input**: Current memory contents + domain context
-- **Output**: Poisoned conversation sessions (user/assistant turns)
-- **Training**: GRPO (Group Relative Policy Optimization), same family as Memory-R1
-- **Reward signal**: Accuracy drop on LongMemEval questions after injecting the poisoned sessions
-  - The attacker never sees the questions — they are only used to compute reward
-  - Reward = (clean accuracy - poisoned accuracy), higher is better for the attacker
+### Stage A — Hub vector generation (done)
+- Compute `H = k-means(Q_train, K)` — centroids of the training-split question embeddings, L2-normalized.
+- Inject `H` into the victim's retrieval index via `MemoryStore.index_raw_embeddings()` (bypasses the encoder — this is the privileged vector-mode upper bound).
+- Per-hub "document" payloads vary: placeholder (`[injected]`), contradictory (fake corrections), or prompt-injection (abstention-bait templates).
+- Diagnostics: displacement rate (fraction of queries where a hub beats the legitimate top-1), hub share in top-k, decoupling cosine between payload-text encoding and hub vector.
+
+### Stage B — Text realization (planned, not built)
+- Drop the vector-mode privilege. The attacker can only write text; its vector is whatever the defender's encoder produces.
+- Goal: generate natural-looking conversation turns that (a) encode near a target hub AND (b) signal contextual emptiness / memory uncertainty, without obvious prompt-injection markers.
+- Likely approach: BoN search from a small attacker LLM scored by (cosine-to-hub) + (fluency) + (abstention-proxy). RL is an option if BoN undershoots.
+- Stage B's achievable attack is strictly ≤ Stage A's ceiling. Part of the thesis contribution is characterizing that gap.
 
 ### Evaluation Pipeline
 1. Take a LongMemEval question with its clean haystack (50 sessions)
@@ -77,12 +90,12 @@ Each architecture has different vulnerability profiles:
 - Different attack vector (external content vs. conversation sessions)
 - Not RL-based
 
-### Novel Contributions
-1. **RL-trained attacker** that learns poisoning strategies end-to-end (no handcrafted heuristics)
-2. **Domain-aware but query-blind** threat model (realistic middle ground)
-3. **Budget-constrained formulation** (N poisoned out of M total sessions)
-4. **Cross-architecture vulnerability comparison** (same attacker vs. multiple memory types)
-5. **Direct optimization on damage** (reward = accuracy drop, not a proxy like storage success)
+### Novel Contributions (revised for hubs)
+1. **Geometric attack on memory retrieval** via adversarial hubs (k-means centroids of the training-query distribution) — no per-query knowledge, no trained generator in Stage A.
+2. **Domain-aware but query-blind** threat model — the attacker has memory read access but never sees downstream queries.
+3. **Budget-constrained formulation** (K injected hub chunks out of ~250 haystack chunks).
+4. **Confident-answer rate as the primary attack metric** — sidesteps the abstention-bucket confound that hides the attack's effect on the user's memory system utility.
+5. **Characterization of the Stage A / Stage B gap** — decoupling cosine quantifies how much of the Stage A ceiling is due to the vector-mode privilege and cannot be reached by a realistic text-mode attack.
 
 ## Generalization Strategy
 
@@ -93,29 +106,35 @@ The concern: results are tied to LongMemEval. Mitigations:
 3. **Qualitative analysis**: Show the generated poisoned sessions exhibit interpretable, generalizable strategies (contradicting facts, temporal confusion, diluting retrieval signal) rather than benchmark-specific tricks.
 4. **Cross-architecture transfer**: If the same attacker degrades RAG, KV store, and full history, the strategies are architecture-general.
 
-## Phased Execution
+## Phased Execution (revised)
 
-### Phase 1 — Baseline (current)
-- Benchmark all memory types clean on LongMemEval
-- Establish performance ceiling for each architecture
-- File structure: `main.py`, `harness.py`, `eval.py`, `memory/`
+### Phase 1 — Baseline (done)
+- Benchmark all memory types clean on LongMemEval.
+- File structure: `main.py`, `harness.py`, `eval.py`, `memory/`.
 
-### Phase 2 — RL Attacker (core contribution)
-- Implement GRPO training loop
-- Train attacker against one memory type (start with RAG — easiest to poison via retrieval)
-- Show measurable accuracy degradation with increasing attacker budget (1, 3, 5, 10 sessions)
-- Ablation: remove memory read access, measure how much attack weakens
+### Phase 2 — Stage A hubness attack (current; Part 2c in progress)
+- k-means hub generation on the training-split question embeddings.
+- Vector-mode injection via `MemoryStore.index_raw_embeddings()`.
+- End-to-end evaluation on val (n=48) and test (n=52) splits with local 7B judge + GPT-4o.
+- Primary metric: confident-answer rate drop. Secondary: recall-only accuracy drop, hub share, abstention delta, decoupling cosine.
+- Best val result: K=30 prompt_injection → −39.6pp confident-answer rate drop (memory refuses 52% of the time vs 12.5% clean).
 
-### Phase 3 — Cross-Architecture Vulnerability
-- Test trained attacker against all memory types
-- Retrain attacker per-architecture if needed
-- Produce vulnerability profile: which memory types are most/least susceptible?
-- Held-out task category experiments for generalization evidence
+### Phase 3 — Stage B text realization (planned)
+- Attacker can only write text. Text goes through the defender's encoder; its vector is the encoding. No vector-mode privilege.
+- Objective: produce natural-looking chat turns that encode near a target hub AND signal contextual uncertainty.
+- Approach (first cut): BoN sampling from a small attacker LLM, scored by cosine-to-hub + fluency + abstention-proxy. RL as a fallback if BoN plateaus.
+- Evaluation on the same val/test splits with the same metrics, so the Stage A/B gap is directly readable.
 
-### Phase 4 — Stretch Goals (if time permits)
-- Attack RL-managed memory (adversarial RL vs. RL)
-- Meta-learning across multiple benchmarks (requires finding/creating additional memory benchmarks)
-- Defense analysis: test against A-MemGuard and show RL attacker bypasses it
+### Phase 4 — Cross-architecture transfer (stretch)
+- Re-run the Stage A hub attack against full_history and rl_memory (non-RAG architectures) by attacking whatever they use for addressability (or showing they are naturally robust because there is no vector index to inject into).
+- Vulnerability profile across memory architectures.
+
+### Phase 5 — Defense characterization (stretch)
+- Test Stage A and (if built) Stage B against A-MemGuard and any published defenses.
+- Claim we can make: "defenses trained on content-injection attacks do not generalize to geometric-displacement attacks" — if it holds.
+
+### Legacy: Phase 2 (REINFORCE, parked)
+The earlier RL-trained attacker under [attack/](attack/) is not the active track. It may reappear in the ablation section of the thesis as "learned text-generation attacker vs geometric hub attacker," but we are not investing further engineering cycles in it.
 
 ## Compute Plan
 

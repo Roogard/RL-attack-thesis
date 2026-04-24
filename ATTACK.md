@@ -1,50 +1,132 @@
-# Phase 2 — RL-Trained Adversarial Memory Poisoning
+# Phase 2 — Adversarial Hubness Attack on Memory-Augmented LLMs
 
-This document describes the implementation that lives under [attack/](attack/) and the surrounding scripts. The full research plan is `~/.claude/plans/i-currently-have-most-optimized-lamport.md`; this file is the engineering side: what was added, how the pieces fit, and what to run next.
+This document is the engineering spec for the current primary attack track under [attacks/](attacks/). An earlier REINFORCE-based approach under [attack/](attack/) is **parked** — see the [Previous approach](#previous-approach-reinforce-parked) section at the bottom for context.
 
-## What Was Added
+## Attack in one paragraph
 
-### Package: [attack/](attack/)
+The attacker injects K synthetic "hub" vectors directly into the victim's retrieval index. Hubs are chosen as k-means centroids of the training-split question embeddings, so they sit in the region of MiniLM space that user questions cluster in. For arbitrary unseen queries they win top-k slots from legitimate documents. When the answer model reads the resulting contaminated context, it sees enough empty / uncertain / instruction-like signals to either abstain ("I don't know") or hallucinate. The primary attack metric is **confident-answer rate drop** — the memory system's usefulness is measured by how often it still gives a direct answer, not only by whether that answer is correct.
 
-| File | Purpose |
-|---|---|
-| [attack/__init__.py](attack/__init__.py) | Package marker. |
-| [attack/probes.py](attack/probes.py) | `DOMAIN_PROBES` — 8 generic queries the attacker uses to read the victim's memory between sessions (work, health, relationships, hobbies, places, purchases, preferences, recent events). `read_memory(mem, date, ...)` concatenates `mem.retrieve()` results. |
-| [attack/caches.py](attack/caches.py) | `CleanCache` — per-question artifacts (clean retrieval ctx, clean answer, clean correctness, q/pred/top-1-chunk embeddings) computed once and pickled. `filter_clean_correct()` drops questions the victim already fails. |
-| [attack/reward.py](attack/reward.py) | All 5 reward components + curriculum schedule + group z-score normalization + composite combiner. |
-| [attack/policy.py](attack/policy.py) | `AttackerPolicy` — Qwen2.5-3B-Instruct + LoRA (rank 16) via HF transformers + peft. `generate_session()` returns parsed turns, raw text, and per-token log-probs. `perplexity()` is the stealth signal. |
-| [attack/rollout.py](attack/rollout.py) | `run_rollout(q, …)` — the autoregressive N-session loop: read memory → generate session → index it → counterfactual turn-reward → repeat → final retrieve/answer/judge → component scores. |
-| [attack/environment.py](attack/environment.py) | `RolloutEnvironment.sample_group(qid, G, step)` — runs G rollouts on one question, applies the curriculum-weighted composite reward, maintains a 512-entry diversity buffer. Framework-agnostic (no hard `verifiers` dep). |
-| [attack/train.py](attack/train.py) | Custom GRPO loop (~150 lines). Per step: pick qid, sample group, recompute log-probs under current policy, REINFORCE update with group-relative advantages, AdamW + grad clip. Logs to `train_log.jsonl`, checkpoints every 500 steps. `--overfit_one` flag for sanity. |
-| [attack/eval_attack.py](attack/eval_attack.py) | Held-out eval. Runs clean-vs-poisoned on the test split, scores with the local 7B judge (always) and GPT-4o (`--use_gpt4o`). `--n_poison` overrides config for budget sweeps; `--memory_read_access` / `--no_memory_read_access` for the MRA ablation. |
+## Threat model
 
-### Scripts
+- Attacker has **domain knowledge** (personal-assistant memory, multi-session conversations) and **memory read access**.
+- Attacker does **not** see the victim's queries, only the existing memory contents.
+- Attacker is **budget-constrained**: K injected hub chunks out of a ~250-chunk haystack.
+- In Stage A (current), the attacker has privileged **write access at the vector level** (`index_raw_embeddings`). This is the upper-bound setting — Stage B will drop this privilege.
 
-| File | Purpose |
-|---|---|
-| [scripts/make_split.py](scripts/make_split.py) | Stratified 80/10/10 split → `configs/splits/rag_attack.json`. |
-| [scripts/sanity_minja_handcraft.py](scripts/sanity_minja_handcraft.py) | Hand-crafted 3-session poison on 10 clean-correct single-session-user questions. **Verification ladder step 1**: target ≥30% flip rate before training. |
-| [scripts/judge_agreement.py](scripts/judge_agreement.py) | Re-judges existing rag/full_history eval files with the local 7B judge and computes Cohen's κ vs. GPT-4o. **Verification ladder step 4**: target κ ≥ 0.75. |
+## Primary attack metric: confident-answer rate
 
-### Tests
+Traditional benchmark accuracy conflates two things:
+- **Wrong confident answers** — a user who trusts them gets false information.
+- **Correct abstentions** — on `_abs` questions, abstention is marked correct.
+
+An attack that makes the memory system abstain on everything pushes both buckets up. Net accuracy change is ambiguous (some questions got "more correct" via coerced abstention, some got "wrong" via abstention-on-recall-questions). But from the user's perspective the memory system is clearly broken: it's refusing to answer half the time.
+
+**Confident-answer rate** = `1 − abstention_rate`. Drop in this metric is our headline number. Secondary metrics: recall-only accuracy drop (from `split_hubs_eval_by_abs.py`), hub share in top-k (mechanism confirmation), decoupling cosine (how far the Stage A ceiling is from realizable Stage B text-mode attacks).
+
+## Package: [attacks/](attacks/)
 
 | File | Purpose |
 |---|---|
-| [tests/test_reward_components.py](tests/test_reward_components.py) | Fixture-based unit tests for all 5 components, curriculum weight phases, and `compose_group` invariants. |
+| [attacks/__init__.py](attacks/__init__.py) | `PoisonSession`, `WritePolicy`, `Attack` protocol. Two injection modes: text (realistic) or raw vectors (vector-mode upper bound). |
+| [attacks/hubness/stage_a_hubs.py](attacks/hubness/stage_a_hubs.py) | `compute_hubs(Q, K, D, method)` — spherical k-means or facility-location on the unit sphere. Returns (hubs, diagnostics: mean_max_sim, displacement_rate, …). |
+| [attacks/eval_hubs.py](attacks/eval_hubs.py) | End-to-end evaluator. Computes hubs from train split, injects per eval question, measures clean vs poisoned. Reports confident-answer rate + accuracy + hub-share + abstention delta + decoupling cosine. |
 
-### Config
+## Memory plumbing
+
+- [memory/base.py](memory/base.py) — `MemoryStore.index_raw_embeddings(embeddings, metadatas, ids, documents)` — vector-mode injection hook. Raises NotImplementedError on memories without an addressable vector layer.
+- [memory/rag.py](memory/rag.py) — RAGMemory override. Bypasses the encoder; writes provided vectors straight into Chroma.
+
+## Scripts
 
 | File | Purpose |
 |---|---|
-| [configs/attack_rag.yaml](configs/attack_rag.yaml) | All training hyperparameters in one place. N=3, G=8, lr=1e-5, max_steps=2000. |
-| `configs/splits/rag_attack.json` | Created by `scripts/make_split.py` (not checked in). |
+| [scripts/validate_stage_a_real.py](scripts/validate_stage_a_real.py) | Part 1 — hub quality on real LongMemEval queries. Measures displacement rate + hub-share@top-k. No GPU required. |
+| [scripts/smoke_stage_a.py](scripts/smoke_stage_a.py) | Original synthetic-data smoke test. Mechanism validation only. |
+| [scripts/split_hubs_eval_by_abs.py](scripts/split_hubs_eval_by_abs.py) | Post-hoc split of `eval_hubs.py` output by abstention vs recall questions + per-question-type breakdown. Primary column is confident-answer rate. |
 
-### Edits to existing files
+## Configs
 
-- [CLAUDE.md](CLAUDE.md) — corrected the "user writes the code" line; this project is Claude-implemented, user-directed.
-- [direction.md](direction.md) — added the **Temporal-Leakage Caveat**: poison sessions inherit `question_date`, so temporal context leaks even in the query-blind setting; framed as "temporal is part of domain knowledge".
+| File | Purpose |
+|---|---|
+| [configs/attack_rag.yaml](configs/attack_rag.yaml) | Shared config (`embed_model`, `top_k`, `answer_batch_size`, `data_path`, `split_path`). The REINFORCE-specific hyperparameters (group_size, lr, max_steps) are kept for historical compatibility but unused by the hubs pipeline. |
+| [configs/splits/rag_attack.json](configs/splits/rag_attack.json) | 80/10/10 stratified split from `scripts/make_split.py`. 398 train / 48 val / 52 test. |
 
-## Architecture and Data Flow
+## Results so far
+
+### Part 1 — Real-data hub quality (val, n=15)
+
+| method | K | displacement_rate | hub_share@10 |
+|---|---:|---:|---:|
+| kmeans | 10 | 0.600 | 0.380 |
+| kmeans | 20 | 0.667 | 0.467 |
+| facility | 10 | 0.600 | 0.400 |
+
+Hubs work at the retrieval layer. `kmeans` is cheap and competitive with `facility`; `kmeans` is the default going forward.
+
+### Part 2 — End-to-end attack on val split (n=48, local 7B judge)
+
+| config | acc drop (recall) | confident-answer drop | abst_p |
+|---|---:|---:|---:|
+| K10 placeholder | +7.0pp | +10.4pp | 22.9% |
+| K10 prompt_injection | +11.6pp | +25.0pp | 37.5% |
+| K30 prompt_injection | +9.3pp | +39.6pp | 52.1% |
+| K100 contradictory | +11.6pp | +12.5pp | 25.0% |
+
+### Part 2c — Test-split headline (n=54, GPT-4o judged) ⭐
+
+These are the numbers to cite in the thesis writeup.
+
+**Overall (n=54):**
+
+| config | acc drop | confident-answer drop | hub/top | abst_p |
+|---|---:|---:|---:|---:|
+| K10_placeholder | +5.6pp | +3.7pp | 3.57 | 7.4% |
+| K10_contradictory | +9.3pp | 0.0pp | 3.57 | 3.7% |
+| K10_prompt_injection | +16.7pp | +22.2pp | 3.57 | 25.9% |
+| K30_placeholder | +16.7pp | +7.4pp | 5.04 | 11.1% |
+| K30_contradictory | +16.7pp | +7.4pp | 5.04 | 11.1% |
+| **K30_prompt_injection** | **+20.4pp** | **+31.5pp** | **5.04** | **35.2%** |
+
+**Recall-only (n=50, the real attacker metric):**
+
+| config | acc drop | cnf drop | abst_p |
+|---|---:|---:|---:|
+| K30_placeholder | +18.0pp | +6.0pp | 10.0% |
+| K30_contradictory | +18.0pp | +6.0pp | 10.0% |
+| **K30_prompt_injection** | **+24.0pp** | **+26.0pp** | **30.0%** |
+
+Clean baseline (recall): 66.0% accuracy, 96.0% confident-answer rate.
+Attacked (K30_prompt_injection): 42.0% accuracy, 70.0% confident-answer rate.
+
+**Per-task vulnerability (K30_prompt_injection, GPT-4o):**
+
+| task type | n | acc drop |
+|---|---:|---:|
+| knowledge-update | 9 | +33.3pp |
+| single-session-assistant | 3 | +33.3pp |
+| single-session-user | 7 | +28.6pp |
+| multi-session | 14 | +21.4pp |
+| temporal-reasoning | 14 | +14.3pp |
+| single-session-preference | 7 | 0.0pp |
+
+Preference questions are resistant across all configs — the judge's rubric accepts degraded context. Knowledge-update is the softest target.
+
+### Attribution: displacement vs weaponization
+
+On recall-only (GPT-4o):
+- K30 **placeholder** (no payload, just displacement): **+18.0pp**
+- K30 **contradictory** (fake-correction text): **+18.0pp** (identical)
+- K30 **prompt_injection** (abstention-bait text): **+24.0pp** (+6.0pp extra)
+
+**~75% of the attack is pure geometric displacement; ~25% is adversarial payload weaponization.** The hubs winning top-k slots matters far more than what text they carry. This is the primary finding — it means the attack mechanism is fundamentally geometric, not content-based, and should transfer to Stage B (text-mode) as long as Stage B can get text encoded near hubs regardless of content.
+
+Flag for verification: K30_placeholder and K30_contradictory produce identical numbers across every bucket and task type on test. Likely coincidence at n=50 (same 9 questions flip under K=30 displacement regardless of payload text), but worth a one-liner per-question cross-check before writeup.
+
+### Decoupling caveat
+
+Across Part 2/2c configs, `cos(encode(payload_text), hub_vector)` is in the 0.04–0.13 range. Vector-mode lets us pick payload text and hub vector independently; text-mode (Stage B) cannot. The Part 2 numbers are therefore an *inflated ceiling* — a realistic text-mode attack produces lower drops because the text's encoded vector won't land exactly at a hub centroid. Given the 75% displacement / 25% weaponization split, **a Stage B attack that matches Stage A's displacement effect would preserve most of the attack** (~14-18pp). The 6pp weaponization component is harder to transfer because it requires adversarial content under a naturalness constraint.
+
+## Architecture and data flow
 
 ```
 LongMemEval JSON
@@ -53,236 +135,154 @@ LongMemEval JSON
 scripts/make_split.py ── configs/splits/rag_attack.json
         │
         ▼
-  attack/caches.py (CleanCache.build → pickle)
+attacks/hubness/stage_a_hubs.py
+        H = compute_hubs(Q_train, K, method="kmeans")
         │
         ▼
-┌──────────────────── attack/train.py (GRPO loop) ────────────────────┐
-│                                                                     │
-│   per step:                                                         │
-│       qid = rng.choice(train_qids)                                  │
-│                                                                     │
-│       RolloutEnvironment.sample_group(qid, G):                      │
-│           for g in 1..G:                                            │
-│               run_rollout(q, cache_entry, policy, embedder, …)      │
-│                  │                                                  │
-│                  ▼                                                  │
-│             ┌─── per session t in 0..N-1 ───┐                       │
-│             │  read_memory(mem, probes)     │                       │
-│             │  policy.generate_session(...) │ AttackerPolicy        │
-│             │  mem.index(session_t)         │ Qwen2.5-3B + LoRA     │
-│             │  counterfactual turn_reward   │                       │
-│             └───────────────────────────────┘                       │
-│                  ↓                                                  │
-│             poisoned_ctx  = mem.retrieve(question)                  │
-│             poisoned_pred = ask_qwen_batch(poisoned_ctx, …)         │
-│             poisoned_correct = judge_answer_local(...)              │
-│             ComponentScores(r_outcome, r_retrieval, r_answer_div,   │
-│                             r_stealth, r_diversity)                 │
-│                                                                     │
-│       compose_group → group-z-scored composite rewards              │
-│       advantages = R_i - mean(R)                                    │
-│       loss = - Σ adv_i · Σ_t logπ(token_t | …)  (recomputed)        │
-│       AdamW step + grad clip                                        │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+┌─── attacks/eval_hubs.py (per eval question) ─────────────────────┐
+│                                                                  │
+│   build RAGMemory, index(haystack)                               │
+│   clean_ctx    = mem.retrieve(q, date)                           │
+│   for each (K, payload) config:                                  │
+│       mem.index_raw_embeddings(H, hub_payload_text)              │
+│       poisoned_ctx = mem.retrieve(q, date)                       │
+│       mem.delete(hub_ids)                                        │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
         │
         ▼
-results/rl_attacker/rag_v1/adapter_final
+harness.ask_qwen_batch(contexts)  — vLLM-batched Qwen2.5-3B answers
+harness.judge_answer_local_batch(...) — local 7B judge (iteration)
+harness.judge_answer(...) — GPT-4o (final, optional)
         │
         ▼
-attack/eval_attack.py ── eval_test_n3.json (clean acc / poisoned acc / drop)
+results/stage_a/<name>.json + .csv   (confident-answer rate primary)
+        │
+        ▼
+scripts/split_hubs_eval_by_abs.py   (recall vs abstention split)
 ```
 
-### Reward in one screen
-
-- `R_outcome` = `1[clean_correct] - 1[poisoned_correct]` (sparse).
-- `R_retrieval` = `max_t cos(emb(session_t), q) - cos(emb(top-1 clean chunk), q)`.
-- `R_answer_div` = `1 - cos(emb(clean_pred), emb(poisoned_pred))` — surrogate for KL.
-- `R_stealth` = `-log(min(PPL, cap))` (+ optional fluency bonus).
-- `R_diversity` = `-max_{s∈buffer} cos(emb(session), emb(s))` against last 512 successful sessions.
-
-Each component is z-scored within the GRPO group, then weighted by the curriculum:
-
-| Steps | w_o | w_r | w_ad | w_s | w_d |
-|---|---|---|---|---|---|
-| 0–500 | 0.10 | 0.50 | 0.30 | 0.10 | 0.00 |
-| 500–2000 | 0.40 | 0.30 | 0.15 | 0.10 | 0.05 |
-| 2000+ | 0.60 | 0.15 | 0.10 | 0.10 | 0.05 |
-
-### Threat model in the code
-
-- `cfg["domain"]` and `cfg["architecture_name"]` are the only architecture leaks given to the policy ([attack/policy.py:41-68](attack/policy.py#L41-L68)).
-- Memory read access is gated by `cfg["memory_read_access"]` → `probes = DOMAIN_PROBES if true else []`. Setting it false runs the blind-attacker ablation.
-- The attacker never sees `q["question"]` or `q["answer"]`. Only the rollout's final pipeline does, and only to compute the reward.
-
-## Run Directions
-
-All commands run from the project root on Microway (CUDA box). Order matters for the first 5 — later ones depend on earlier outputs.
+## Run directions
 
 ### 0. Environment
 
+On the cluster, inside `.venv/`:
 ```bash
-pip install -U torch transformers peft sentence-transformers vllm chromadb tqdm pyyaml scikit-learn
+pip install sentence-transformers<4 transformers<5 chromadb pyyaml tqdm
+# vLLM, torch, peft are already installed from the REINFORCE bootstrap.
 ```
 
-(`scikit-learn` is only needed by `scripts/judge_agreement.py` for Cohen's κ.)
-
-### 1. Build the train/val/test split
+### 1. Part 1 — Stage A quality on real queries (no GPU)
 
 ```bash
-python scripts/make_split.py
+python scripts/validate_stage_a_real.py \
+    --n_val 15 --K_values 1 3 5 10 20 --methods kmeans facility \
+    --out results/stage_a/real_data_validation.json
 ```
 
-Produces [configs/splits/rag_attack.json](configs/splits/rag_attack.json) — 80/10/10 stratified by question_type, seeded.
+Pass criteria (currently pass): kmeans K=10 displacement ≥ 0.30 AND hub_share@10 ≥ 0.30.
 
-### 2. Verification ladder — sanity checks BEFORE training
-
-These confirm the pipeline is sound. Skip at your peril.
-
-**2a. Hand-crafted MINJA upper bound (target ≥30% flip rate):**
+### 2. Part 2 — End-to-end on val (with diagnostics)
 
 ```bash
-python scripts/sanity_minja_handcraft.py
+CUDA_VISIBLE_DEVICES=0,1 JUDGE_DEVICE=cuda:1 .venv/bin/python -m attacks.eval_hubs \
+    --config configs/attack_rag.yaml \
+    --split val \
+    --hub_scope global \
+    --K_values 10 30 100 --payloads placeholder contradictory prompt_injection \
+    --output results/stage_a/eval_val_diag.json
 ```
 
-If this fails, the RAG pipeline can't be poisoned by *any* attacker — debug RAGMemory before doing anything else.
+Single-GPU fallback: `CUDA_VISIBLE_DEVICES=0 VLLM_GPU_MEM_UTIL=0.3 python -m attacks.eval_hubs ...`
 
-**2b. Local-judge / GPT-4o agreement (target κ ≥ 0.75):**
-
+Inspect recall-vs-abstention breakdown:
 ```bash
-python scripts/judge_agreement.py --eval_file results/benchmark/rag_eval.json
+python scripts/split_hubs_eval_by_abs.py results/stage_a/eval_val_diag.json
 ```
 
-If κ < 0.75, the local judge is too noisy to use as the RL reward — retune the judge prompt or upgrade to a 14B local judge before training.
-
-**2c. Reward unit tests:**
+### 3. Part 2c — Test-split headline number
 
 ```bash
-pytest tests/test_reward_components.py -v
-```
-
-### 3. Build the clean cache
-
-```bash
-python -c "
-from attack.train import load_config, load_dataset
-from attack.caches import CleanCache
-cfg = load_config('configs/attack_rag.yaml')
-qs = load_dataset(cfg['data_path'], cfg['split_path'], 'train')
-cache = CleanCache.build(qs, embed_model_name=cfg['embed_model'],
-                         top_k=cfg['top_k'],
-                         answer_batch_size=cfg['answer_batch_size'])
-cache.save(cfg['cache_path'])
-print(f'cached {len(cache)} train, {sum(e.clean_correct for e in cache.entries())} clean_correct')
-"
-```
-
-`attack/train.py` will also build it on first run, but doing it as a separate step makes failures easier to debug. ~5–10 min on a single GPU.
-
-### 4. Overfit-one sanity (target: R_outcome → 1.0 within ~50 steps)
-
-```bash
-python -m attack.train --config configs/attack_rag.yaml --overfit_one
-```
-
-Watch `results/rl_attacker/rag_v1/train_log.jsonl` — `flips_in_group` should hit 16/16 within ~50 steps. If it doesn't, the RL loop is broken.
-
-### 5. Full training
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m attack.train --config configs/attack_rag.yaml
-```
-
-2000 steps × G=16 batched rollouts ≈ **~17 GPU-hours on one H200**. Checkpoints land in `results/rl_attacker/rag_v1/adapter_step_{500,1000,1500}` (each with `trainer_state.pt`) plus `adapter_final`. Logs in `train_log.jsonl`.
-
-**Resume after interruption:**
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m attack.train --config configs/attack_rag.yaml \
-  --resume_from results/rl_attacker/rag_v1/adapter_step_1500
-```
-
-Restores LoRA, optimizer state, RNGs, and step counter. Training continues from step 1501.
-
-**Run all 4 H200s in parallel (recommended):**
-
-```bash
-# Terminal 1 — main training
-CUDA_VISIBLE_DEVICES=0 python -m attack.train --config configs/attack_rag.yaml &
-
-# Terminal 2 — MRA-off ablation (copy config, edit memory_read_access: false, output_dir: rag_v1_mra_off)
-CUDA_VISIBLE_DEVICES=1 python -m attack.train --config configs/attack_rag_mra_off.yaml &
-
-# Terminal 3 — outcome-only reward (edit reward.py weights to (1,0,0,0,0), output_dir: rag_v1_outcome_only)
-CUDA_VISIBLE_DEVICES=2 python -m attack.train --config configs/attack_rag_outcome_only.yaml &
-
-# Terminal 4 — N=1 budget (edit n_poison: 1, output_dir: rag_v1_n1)
-CUDA_VISIBLE_DEVICES=3 python -m attack.train --config configs/attack_rag_n1.yaml &
-
-wait
-```
-
-All four finish in ~17h wall clock — full ablation sweep in one overnight.
-
-### 6. Held-out evaluation (headline number)
-
-```bash
-python -m attack.eval_attack \
-  --config configs/attack_rag.yaml \
-  --adapter results/rl_attacker/rag_v1/adapter_final \
-  --split test \
-  --n_poison 3 \
-  --output results/rl_attacker/rag_v1/eval_test_n3.json \
-  --use_gpt4o
-```
-
-Acceptance: GPT-4o-judged clean acc ≥ 49%, poisoned acc ≤ 35% (≥14 pt drop).
-
-### 7. Ablations
-
-**Budget sweep** (~30 min each):
-
-```bash
-for N in 1 3 5 10; do
-  python -m attack.eval_attack --config configs/attack_rag.yaml \
-    --adapter results/rl_attacker/rag_v1/adapter_final \
-    --split test --n_poison $N \
-    --output results/rl_attacker/rag_v1/eval_test_n${N}.json \
+CUDA_VISIBLE_DEVICES=0,1 JUDGE_DEVICE=cuda:1 .venv/bin/python -m attacks.eval_hubs \
+    --config configs/attack_rag.yaml \
+    --split test \
+    --hub_scope global \
+    --K_values 10 30 --payloads placeholder contradictory prompt_injection \
+    --output results/stage_a/eval_test_conf.json \
     --use_gpt4o
-done
+
+python scripts/split_hubs_eval_by_abs.py results/stage_a/eval_test_conf.json --judge gpt4o
 ```
 
-**Memory-read-access on/off:**
+### 4. Part 4 — Stage B (scope + open questions, not yet built)
 
-```bash
-python -m attack.eval_attack --config configs/attack_rag.yaml \
-  --adapter results/rl_attacker/rag_v1/adapter_final \
-  --split test --n_poison 3 --memory_read_access \
-  --output results/rl_attacker/rag_v1/eval_test_n3_mra_on.json --use_gpt4o
+**Goal.** Produce realistic user/assistant conversation turns that, when indexed normally through the defender's encoder (`all-MiniLM-L6-v2`, no vector-mode privilege), land near a target hub vector. Then ship those turns through the regular memory pipeline and measure the resulting confident-answer drop. The "natural-looking + hub-like" pair is the whole problem.
 
-python -m attack.eval_attack --config configs/attack_rag.yaml \
-  --adapter results/rl_attacker/rag_v1/adapter_final \
-  --split test --n_poison 3 --no_memory_read_access \
-  --output results/rl_attacker/rag_v1/eval_test_n3_mra_off.json --use_gpt4o
-```
+**What we learned from Part 2 that changes Stage B scope:**
 
-If MRA-on minus MRA-off < 5 pt, the threat-model novelty (read-access axis) doesn't earn its place — flag this in the thesis.
+1. **75% of the attack is displacement, only 25% is payload content.** Stage B doesn't need adversarial content to recover most of the attack — it just needs text that encodes near hub centroids. This makes the realism constraint much less painful than I initially feared.
+2. **Prompt-injection-style payloads add +6pp.** If Stage B can layer a stealthy abstention-bait signal into otherwise natural-looking turns, we pick that up. But it's a secondary objective.
+3. **Decoupling cos is 0.04-0.13 today.** Stage B needs to raise it to some threshold — unclear what threshold (0.3? 0.5?) is enough to still win top-k.
 
-**Untrained baseline** (does the LoRA actually do anything?):
+**Design questions to resolve tomorrow:**
 
-```bash
-python -m attack.eval_attack --config configs/attack_rag.yaml \
-  --adapter none --split test --n_poison 3 \
-  --output results/rl_attacker/rag_v1/eval_test_n3_untrained.json --use_gpt4o
-```
+1. **Generation approach.**
+   - **BoN (best-of-N sampling)** — prompt an attacker chat LLM for candidate turns, encode each, keep the one closest to the hub. Simple, no training. Scales with compute.
+   - **Gradient-based** — discrete text optimization (GCG / HotFlip / PEZ) on token embeddings to minimize distance to hub. More precise but slower and less fluent.
+   - **Hybrid** — BoN to find a rough candidate, gradient to refine. Best of both worlds.
+   - **RL** — treat candidate generation as a policy, optimize against hub-distance + fluency + abstention-proxy. Most expensive; probably overkill given displacement does most of the work.
 
-**Reward-component ablations** — re-train with one weight zeroed at a time. Edit `attack/reward.py:curriculum_weights_for_step`, change config `output_dir`, repeat steps 5–6. Each takes ~17h on one H200; run them in parallel across the 4 GPUs.
+2. **Fitness function.** For candidate text `t`, target hub `h`:
+   - `cos(encode(t), h)` — retrieval fitness (primary)
+   - fluency score (e.g., attacker LLM log-prob) — naturalness constraint
+   - abstention-signal proxy — optional. Could be "text mentions uncertainty / denial / no-memory-here." Measure separately.
 
-**Cross-architecture transfer** — Phase 3 work, not implemented yet.
+3. **Budget.** Stage A used K=30 hubs. If each hub needs its own generated text, that's 30 text chunks to produce per attack. If we can reuse one text per multiple hubs (or one text per cluster of related hubs), budget drops.
 
-### 8. Artifacts to include in the thesis
+4. **Target-hub selection.** Stage A used all K k-means centroids. Stage B might need to be picky — generate text for only the 5-10 easiest-to-hit hubs (ones whose region has dense natural-text neighbors in the encoder's training distribution).
 
-- `train_log.jsonl` curves: loss, reward components, `flips_in_group`.
-- `eval_test_n{1,3,5,10}.json` — budget sweep table.
-- `eval_test_n3_mra_{on,off}.json` — MRA ablation.
-- 50 random poisoned sessions hand-graded for "looks like plausible chat" (acceptance: ≥80%).
+5. **Evaluation.** Plug Stage B output into the same `attacks/eval_hubs.py` pipeline via the text-mode injection path (not `index_raw_embeddings` — actual `mem.index` with generated sessions). Same metrics (confident-answer rate drop, recall-only acc drop). Same test split.
+
+**Minimal first cut (to discuss tomorrow):**
+
+A small script `attacks/hubness/stage_b_bon.py` that:
+1. Loads the K=30 hubs from Stage A.
+2. For each hub, runs BoN=64 candidate generations from an attacker chat LLM (Qwen2.5-3B, already loaded via `_vllm_engines.get_attacker_engine`), prompting for plausible user/assistant turns about generic memory topics (work, health, relationships, etc.).
+3. Encodes each candidate, keeps the one with highest `cos(encode(turn), hub)`.
+4. Emits the 30 selected turns as a list of `PoisonSession`s.
+5. Runs `eval_hubs.py` in text-mode (new flag `--stage b_sessions <file.json>`) on the test split.
+
+Estimated effort: ~200 lines new code + ~30 line patch to `eval_hubs.py` to accept pre-built `PoisonSession` inputs. Half a day.
+
+Open before coding: which attacker LLM, what prompt, what BoN budget, does the existing `_vllm_engines.get_attacker_engine` already fit the bill or do we need a fresh generation engine.
+
+## Status
+
+- Part 1 — Stage A hub quality — **done**, passing.
+- Part 2 — End-to-end vector-mode eval with diagnostics (val split) — **done**.
+- Part 2c — Test-split + GPT-4o headline — **done**. K30_prompt_injection: +20.4pp accuracy drop, +31.5pp confident-answer drop overall; +24.0pp accuracy drop on recall-only.
+- Part 3 — Docs rewrite for hubs-primary framing — **done** (this document + [direction.md](direction.md)).
+- Part 4 — Stage B text realization — **next**. Scope sketched above. User wants to focus on this next session; minimal first cut is ~200 lines code + eval_hubs.py patch. Stage B design questions to discuss before implementation.
+
+## Tonight's session summary (2026-04-23)
+
+Kicked off the pivot from REINFORCE to hubness. Sequence:
+1. Built `scripts/validate_stage_a_real.py` — confirmed hubs displace real docs on LongMemEval queries (60% displacement at K=10 kmeans).
+2. Built `attacks/eval_hubs.py` — end-to-end attack evaluator. Confirmed mechanism: hubs reach top-10 on ~90-100% of queries.
+3. Val-split diagnostic runs uncovered the abstention-bucket confound. Reframed primary metric to confident-answer rate.
+4. Added diagnostics: hub-count-in-top-k, abstention-markers detection, decoupling cos.
+5. Added three payload modes: `placeholder`, `contradictory`, `prompt_injection`.
+6. Test split + GPT-4o: locked in headline numbers, found 75% of the attack is pure displacement.
+7. Rewrote ATTACK.md and direction.md for the new framing.
+
+**Key decisions made tonight:**
+- REINFORCE (under [attack/](attack/)) is parked permanently. Hubs is the primary track.
+- Confident-answer rate is the primary attack metric, not overall accuracy.
+- The displacement effect is the main contribution — the text carried by hubs matters less than expected.
+- Stage B is next but unscoped in code.
+
+**Thesis path still TBD** — I sketched three options in [direction.md](direction.md#phased-execution-revised). User was too tired to decide tonight; picking this up next session.
+
+## Previous approach (REINFORCE, parked)
+
+The [attack/](attack/) package contains an earlier GRPO-trained text-generation attacker (Qwen2.5-3B + LoRA rank 16, 5 composite reward components, curriculum schedule, 2000-step training loop). Infrastructure reached a working state (chunked logprob backward, vLLM LoRA hot-swap, multi-GPU judge split), but full training was not converged at the time of the pivot, and the contribution direction shifted to geometric hubs with a different primary metric. The REINFORCE code is preserved for ablation comparisons if the thesis needs them, but is not the active track. See commits `01798e8`..`7d671aa` for the infrastructure work and `1be8518` for the pivot.
