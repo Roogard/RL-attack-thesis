@@ -586,6 +586,10 @@ def main():
     rows: list[dict] = []
 
     for (K, payload) in config_keys:
+        # Config key is needed in the per-qid rows loop below, so compute it
+        # up front. In text-mode (poison_file), K is the literal "text" and
+        # payload is the poison-file stem.
+        key = f"text_{payload}" if args.poison_file else f"K{K}_{payload}"
         per_task_local = defaultdict(lambda: {"n": 0, "clean": 0, "poisoned": 0})
         per_task_gpt = defaultdict(lambda: {"n": 0, "clean": 0, "poisoned": 0})
         hub_counts = []
@@ -629,7 +633,7 @@ def main():
                 "poisoned_correct_gpt4o": (gpt4o_correct[poisoned_idx] if args.use_gpt4o else None),
             })
 
-        key = f"text_{payload}" if args.poison_file else f"K{K}_{payload}"
+        # `key` already computed at top of this loop.
         n = len(eval_qids)
         # Confident-answer rate = fraction of questions where the model gave
         # a direct answer rather than abstaining. This is the primary attack
