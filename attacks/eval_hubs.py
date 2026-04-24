@@ -242,6 +242,14 @@ def main():
     p.add_argument("--output", required=True)
     p.add_argument("--use_gpt4o", action="store_true",
                    help="Also run the GPT-4o judge on clean+poisoned answers.")
+    p.add_argument("--poison_file", default=None,
+                   help="Stage B text-mode attack: path to a JSON from "
+                        "attacks/hubness/stage_b_*.py. When set, hub vectors "
+                        "are NOT injected directly; instead the (user,assistant) "
+                        "sessions in the file are indexed through the defender's "
+                        "encoder via mem.index() — the realistic text-mode path. "
+                        "Vector-mode args (--K_values, --payloads, --hub_scope) "
+                        "are ignored in this mode.")
     args = p.parse_args()
 
     # Fail fast if --use_gpt4o was requested but the key isn't set.
@@ -274,10 +282,32 @@ def main():
     print(f"[eval_hubs] loading encoder {embed_model} ...")
     encoder = SentenceTransformer(embed_model)
 
+    # ── text-mode (Stage B) early branch ─────────────────────────────────
+    # If a poison file is provided, we skip all vector-mode hub computation
+    # and just index the generated sessions through the defender's encoder.
+    # Everything downstream (answer generation, judging, aggregation) stays
+    # the same; the only difference is one config per run and one mem.index
+    # call per qid in place of the index_raw_embeddings loop.
+    poison_data: dict | None = None
+    if args.poison_file:
+        from attacks.hubness.stage_b_common import read_poison_file
+        poison_data = read_poison_file(args.poison_file)
+        print(
+            f"[eval_hubs] TEXT-MODE attack from {args.poison_file}"
+            f"  method={poison_data['method']}  K={poison_data['K']}  "
+            f"mean_cos={poison_data.get('mean_cos_to_hub')}"
+        )
+        # Override any vector-mode args to a single text-mode config.
+        config_keys = [("text", Path(args.poison_file).stem)]
+
     Q_val: np.ndarray | None = None
     hubs_by_K: dict[int, np.ndarray] = {}
 
-    if args.hub_scope == "global":
+    if args.poison_file:
+        # Nothing to precompute on the vector side.
+        hub_docs_cache: dict[tuple[int, str], list[str]] = {}
+        decoupling_cos: dict[str, dict] = {}
+    elif args.hub_scope == "global":
         train_texts = [by_qid[qid]["question"] for qid in train_qids]
         t0 = time.time()
         Q_train = _l2_normalize(
@@ -397,7 +427,53 @@ def main():
         })
 
         # Poisoned retrieves — inject, retrieve, delete per config
-        for (K, payload) in config_keys:
+        for cfg_key in config_keys:
+            if args.poison_file:
+                # Stage B text-mode: index generated user/assistant rounds
+                # via the defender's normal RAGMemory.index() path — through
+                # the encoder, not around it.
+                poison_sessions = [
+                    [
+                        {"role": "user", "content": s["user_msg"]},
+                        {"role": "assistant", "content": s["assistant_msg"]},
+                    ]
+                    for s in poison_data["sessions"]
+                ]
+                # Use far-future date so poison chunks sort last in the
+                # chronological post-retrieve reorder; Chroma's top-k
+                # selection is unaffected by date.
+                poison_dates = ["2099-12-31"] * len(poison_sessions)
+                poison_sids = [
+                    f"POISON_STAGE_B_{s['hub_idx']}" for s in poison_data["sessions"]
+                ]
+                mem.index(poison_sessions, poison_dates, poison_sids)
+                poisoned_ctx = mem.retrieve(q["question"], q["question_date"], top_k=top_k)
+                # Count chunks whose session_id marks them as poison-added.
+                # mem.retrieve() emits date + text only (no session_id in the
+                # rendered string), so we match on the far-future date header.
+                n_hubs = sum(
+                    1 for chunk in (poisoned_ctx.split("\n\n---\n\n") if poisoned_ctx else [])
+                    if "[Session Date: 2099-12-31]" in chunk
+                )
+                # Remove poison so the next qid's clean retrieve (rebuilt fresh
+                # anyway) isn't contaminated — belt and suspenders.
+                try:
+                    mem._collection.delete(where={"session_id": {"$in": poison_sids}})
+                except Exception:
+                    pass
+                retrieval_records.append({
+                    "qid": qid,
+                    "question": q["question"],
+                    "question_date": q["question_date"],
+                    "question_type": q["question_type"],
+                    "answer": q["answer"],
+                    "config_key": cfg_key,
+                    "context": poisoned_ctx,
+                    "n_hubs_in_topk": n_hubs,
+                })
+                continue
+
+            K, payload = cfg_key  # vector-mode config key is (int, str)
             if args.hub_scope == "oracle":
                 # H = K copies of this val question's own query embedding. All K
                 # vectors are identical → all K tie for top similarity, so they
@@ -536,7 +612,7 @@ def main():
             rows.append({
                 "qid": qid,
                 "question_type": qt,
-                "config": f"K{K}_{payload}",
+                "config": key,
                 "K": K,
                 "payload": payload,
                 "n_hubs_in_topk": retrieval_records[poisoned_idx]["n_hubs_in_topk"],
@@ -550,7 +626,7 @@ def main():
                 "poisoned_correct_gpt4o": (gpt4o_correct[poisoned_idx] if args.use_gpt4o else None),
             })
 
-        key = f"K{K}_{payload}"
+        key = f"text_{payload}" if args.poison_file else f"K{K}_{payload}"
         n = len(eval_qids)
         # Confident-answer rate = fraction of questions where the model gave
         # a direct answer rather than abstaining. This is the primary attack
