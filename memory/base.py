@@ -41,6 +41,17 @@ class MemoryStore(ABC):
         """Reset the store between questions."""
         pass
 
+    def index_raw_embeddings(self, embeddings, metadatas, ids, documents=None):
+        """Inject pre-computed embedding vectors, bypassing the encoder.
+
+        Used by vector-mode upper-bound attacks (Stage A vector-mode in the
+        hubness pipeline). Vector-backed memories (RAG) override this; memories
+        without an addressable vector layer raise NotImplementedError.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support raw embedding injection"
+        )
+
     @classmethod
     def index_batch(cls, instances, questions):
         """Index B questions in parallel.

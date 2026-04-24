@@ -81,6 +81,24 @@ class RAGMemory(MemoryStore):
 
         return "\n\n---\n\n".join(chunks)
 
+    def index_raw_embeddings(self, embeddings, metadatas, ids, documents=None):
+        """Inject pre-computed L2-normalized vectors directly into the collection.
+
+        ChromaDB skips the embedding function for items where embeddings are
+        provided. `documents` is the text returned by retrieve() when the
+        vector wins; default is a neutral placeholder so retrieval-displacement
+        is the only effect on accuracy. metadatas must include 'date' and
+        'round_index' (used by retrieve() for chronological ordering).
+        """
+        if documents is None:
+            documents = ["[injected]" for _ in ids]
+        self._collection.add(
+            embeddings=[list(map(float, e)) for e in embeddings],
+            documents=list(documents),
+            metadatas=list(metadatas),
+            ids=list(ids),
+        )
+
     def clear(self):
         try:
             self._client.delete_collection(self._collection_name)
