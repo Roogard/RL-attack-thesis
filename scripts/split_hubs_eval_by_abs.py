@@ -68,14 +68,19 @@ def main():
         }
 
     # ── recall vs abstention split ───────────────────────────────────────
+    # Primary attack metric: confident-answer rate = 1 - abstention_rate.
+    # Under the attacker's framing, abstention IS a successful attack —
+    # a memory system that refuses to answer is a broken memory system.
+    # The traditional accuracy drop is shown alongside as secondary.
     print()
-    print("=" * 110)
+    print("=" * 128)
     print(f"POST-HOC SPLIT — {args.eval_json}   (judge={args.judge}, n_eval={n_eval}, top_k={top_k})")
-    print("=" * 110)
+    print("=" * 128)
     header = (
         f"{'config':<22} {'bucket':<10} {'n':>3}   "
-        f"{'clean':>6} {'pois':>6} {'drop':>6}   "
-        f"{'abst_c%':>8} {'abst_p%':>8} {'abst_Δ%':>8}"
+        f"{'cnf_c':>6} {'cnf_p':>6} {'cnf_Δ':>6}   "
+        f"{'acc_c':>6} {'acc_p':>6} {'acc_Δ':>6}   "
+        f"{'abst_c%':>7} {'abst_p%':>7}"
     )
     print(header)
     print("-" * len(header))
@@ -87,11 +92,14 @@ def main():
         for bucket_name, s in [("recall", recall), ("abstention", abst), ("overall", overall)]:
             if s["n"] == 0:
                 continue
+            conf_c = 1.0 - s["abst_c_rate"]
+            conf_p = 1.0 - s["abst_p_rate"]
+            conf_d = conf_c - conf_p
             print(
                 f"{cfg:<22} {bucket_name:<10} {s['n']:>3}   "
-                f"{s['clean_acc']:>6.3f} {s['pois_acc']:>6.3f} {s['drop']:>6.3f}   "
-                f"{100*s['abst_c_rate']:>7.1f}% {100*s['abst_p_rate']:>7.1f}% "
-                f"{100*s['abst_delta']:>+7.1f}%"
+                f"{conf_c:>6.3f} {conf_p:>6.3f} {conf_d:>+6.3f}   "
+                f"{s['clean_acc']:>6.3f} {s['pois_acc']:>6.3f} {s['drop']:>+6.3f}   "
+                f"{100*s['abst_c_rate']:>6.1f}% {100*s['abst_p_rate']:>6.1f}%"
             )
         print()
 

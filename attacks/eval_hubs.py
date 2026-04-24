@@ -527,6 +527,13 @@ def main():
 
         key = f"K{K}_{payload}"
         n = len(eval_qids)
+        # Confident-answer rate = fraction of questions where the model gave
+        # a direct answer rather than abstaining. This is the primary attack
+        # metric: the attacker wants the memory system to become less useful,
+        # which manifests as wrong answers + abstentions. Confident-answer
+        # rate captures both failure modes as "memory did not answer usefully."
+        clean_confident_rate = 1.0 - clean_abstentions / max(n, 1)
+        pois_confident_rate = 1.0 - poisoned_abstentions / max(n, 1)
         summary_entry = {
             "K": K,
             "payload": payload,
@@ -540,6 +547,11 @@ def main():
                 "clean_rate": clean_abstentions / max(n, 1),
                 "poisoned_rate": poisoned_abstentions / max(n, 1),
                 "delta": (poisoned_abstentions - clean_abstentions) / max(n, 1),
+            },
+            "confident_answer": {
+                "clean_rate": clean_confident_rate,
+                "poisoned_rate": pois_confident_rate,
+                "drop": clean_confident_rate - pois_confident_rate,
             },
             "local_judge": _summarize(per_task_local),
         }
@@ -571,45 +583,66 @@ def main():
     csv_path = out_path.with_suffix(".csv")
     with open(csv_path, "w", encoding="utf-8") as f:
         judges = ["local"] + (["gpt4o"] if args.use_gpt4o else [])
-        header = ["config", "K", "payload", "method", "judge", "n", "clean_acc", "poisoned_acc", "drop"]
+        header = [
+            "config", "K", "payload", "method", "judge", "n",
+            "clean_acc", "poisoned_acc", "acc_drop",
+            "clean_confident", "poisoned_confident", "confident_drop",
+            "mean_hubs_in_topk", "hub_share_topk", "decoupling_cos",
+        ]
         f.write(",".join(header) + "\n")
         for key, s in per_config_summary.items():
+            conf = s["confident_answer"]
+            mech = s["mechanism"]
+            decpl = s.get("decoupling_cos", {}).get("mean_paired_cos", float("nan"))
             for judge in judges:
                 jk = f"{judge}_judge"
                 row = s[jk]["overall"]
                 f.write(",".join(str(x) for x in [
                     key, s["K"], s["payload"], s["method"], judge,
                     row["n"], f"{row['clean_acc']:.4f}", f"{row['poisoned_acc']:.4f}", f"{row['drop']:.4f}",
+                    f"{conf['clean_rate']:.4f}", f"{conf['poisoned_rate']:.4f}", f"{conf['drop']:.4f}",
+                    f"{mech['mean_hubs_in_topk']:.3f}", f"{mech['hub_share_topk']:.4f}",
+                    f"{decpl:.4f}" if not np.isnan(decpl) else "",
                 ]) + "\n")
 
     # ── print summary ────────────────────────────────────────────────────
+    # Two metrics printed per config:
+    #   acc_drop    = traditional benchmark accuracy drop (confounded by
+    #                 abstention-question bucket; see split_hubs_eval_by_abs.py
+    #                 for the recall-only breakdown)
+    #   conf_drop   = confident-answer-rate drop = (1 - abst_c) - (1 - abst_p)
+    #                 = how much MORE often the model refuses to answer.
+    #                 This is the primary attack metric: the goal is a
+    #                 memory system that no longer answers confidently.
     print()
-    print("=" * 104)
+    print("=" * 116)
     print(f"STAGE A END-TO-END — split={args.split} n={len(eval_qids)} top_k={top_k} scope={args.hub_scope}")
-    print("=" * 104)
+    print("=" * 116)
     header = (
-        f"{'config':<22} {'judge':<6} {'clean':>6} {'pois':>6} {'drop':>6}  "
-        f"{'hub/topk':>9} {'anyhub%':>8} {'abst_c%':>8} {'abst_p%':>8} {'decpl_cos':>10}"
+        f"{'config':<22} {'judge':<6} {'acc_c':>6} {'acc_p':>6} {'acc_Δ':>6}  "
+        f"{'cnf_c':>6} {'cnf_p':>6} {'cnf_Δ':>6}  "
+        f"{'hub/top':>8} {'anyhub':>7} {'decpl':>7}"
     )
     print(header)
     print("-" * len(header))
     for key, s in per_config_summary.items():
         mech = s["mechanism"]
-        abst = s["abstention"]
+        conf = s["confident_answer"]
         decpl = s.get("decoupling_cos", {}).get("mean_paired_cos", float("nan"))
         loc = s["local_judge"]["overall"]
         print(
-            f"{key:<22} {'local':<6} {loc['clean_acc']:>6.3f} {loc['poisoned_acc']:>6.3f} "
-            f"{loc['drop']:>6.3f}  {mech['mean_hubs_in_topk']:>9.2f} "
-            f"{100*mech['any_hub_in_topk_rate']:>7.1f}% "
-            f"{100*abst['clean_rate']:>7.1f}% {100*abst['poisoned_rate']:>7.1f}% "
-            f"{decpl:>10.3f}"
+            f"{key:<22} {'local':<6} "
+            f"{loc['clean_acc']:>6.3f} {loc['poisoned_acc']:>6.3f} {loc['drop']:>+6.3f}  "
+            f"{conf['clean_rate']:>6.3f} {conf['poisoned_rate']:>6.3f} {conf['drop']:>+6.3f}  "
+            f"{mech['mean_hubs_in_topk']:>8.2f} "
+            f"{100*mech['any_hub_in_topk_rate']:>6.1f}% "
+            f"{decpl:>7.3f}"
         )
         if args.use_gpt4o:
             gpt = s["gpt4o_judge"]["overall"]
             print(
-                f"{key:<22} {'gpt4o':<6} {gpt['clean_acc']:>6.3f} {gpt['poisoned_acc']:>6.3f} "
-                f"{gpt['drop']:>6.3f}"
+                f"{key:<22} {'gpt4o':<6} "
+                f"{gpt['clean_acc']:>6.3f} {gpt['poisoned_acc']:>6.3f} {gpt['drop']:>+6.3f}"
             )
     print()
     print(f"Wrote {out_path}")
