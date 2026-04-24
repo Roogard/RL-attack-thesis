@@ -244,6 +244,19 @@ def main():
                    help="Also run the GPT-4o judge on clean+poisoned answers.")
     args = p.parse_args()
 
+    # Fail fast if --use_gpt4o was requested but the key isn't set.
+    # harness.py reads it lazily on first API call, but by then we've
+    # already burned ~30 min of GPU on indexing + answers + local judge
+    # only to crash at the last step. Check up front instead.
+    if args.use_gpt4o:
+        from dotenv import load_dotenv
+        load_dotenv()
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise SystemExit(
+                "--use_gpt4o requires OPENAI_API_KEY. Add it to .env or export "
+                "it in the shell before running. See SETUP.md."
+            )
+
     cfg = _load_config(args.config)
     embed_model = cfg["embed_model"]
     top_k = args.top_k if args.top_k is not None else cfg["top_k"]
@@ -452,18 +465,30 @@ def main():
     print(f"[eval_hubs] local judge in {time.time()-t0:.1f}s")
 
     # Optional GPT-4o judge — sequential; has its own backoff in harness.
+    # If it fails partway (rate limit, network, key), catch the exception,
+    # force --use_gpt4o off for downstream aggregation, and still write the
+    # local-judge results so we don't lose ~30 min of upstream work.
     gpt4o_correct: list[bool | None] = [None] * len(retrieval_records)
+    gpt4o_completed = False
     if args.use_gpt4o:
         print(f"[eval_hubs] judging {len(retrieval_records)} answers with GPT-4o ...")
         t0 = time.time()
-        for i, rec in enumerate(retrieval_records):
-            gpt4o_correct[i] = judge_answer(
-                rec["question"], rec["answer"], answers[i],
-                rec["question_type"], rec["qid"],
-            )
-            if (i + 1) % 25 == 0:
-                print(f"  gpt4o {i+1}/{len(retrieval_records)}")
-        print(f"[eval_hubs] gpt-4o judge in {time.time()-t0:.1f}s")
+        try:
+            for i, rec in enumerate(retrieval_records):
+                gpt4o_correct[i] = judge_answer(
+                    rec["question"], rec["answer"], answers[i],
+                    rec["question_type"], rec["qid"],
+                )
+                if (i + 1) % 25 == 0:
+                    print(f"  gpt4o {i+1}/{len(retrieval_records)}")
+            print(f"[eval_hubs] gpt-4o judge in {time.time()-t0:.1f}s")
+            gpt4o_completed = True
+        except Exception as e:
+            print(f"[eval_hubs] GPT-4o judge FAILED at index {i}/{len(retrieval_records)}: "
+                  f"{type(e).__name__}: {e}")
+            print(f"[eval_hubs] continuing with local-judge-only output; re-run the same "
+                  f"command with the key fixed to get GPT-4o numbers.")
+            args.use_gpt4o = False  # downstream aggregation skips gpt4o fields
 
     # ── aggregate ────────────────────────────────────────────────────────
     # Index records by (qid, config_key) for quick lookup
