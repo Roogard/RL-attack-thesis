@@ -34,8 +34,10 @@ from attacks.hubness.stage_b_common import (
     PoisonSessionRecord,
     encode_many,
     format_round_text,
+    iter_longmemeval_train_rounds,
     l2_normalize,
     load_hubs,
+    normalize_text,
     write_poison_file,
 )
 
@@ -45,48 +47,26 @@ def _collect_corpus_rounds(
 ) -> tuple[list[tuple[str, str]], list[dict]]:
     """Walk every train-split question's haystack, pull out 2-turn rounds
     as (user_msg, assistant_msg) pairs. Returns pairs + metadata for each.
+
+    Wraps the shared `iter_longmemeval_train_rounds` and applies the same
+    in-memory normalized-text dedup the original implementation used.
     """
-    with open(data_path, encoding="utf-8") as f:
-        data = json.load(f)
-    by_qid = {q["question_id"]: q for q in data}
-    seen_texts: set[str] = set()
+    seen: set[str] = set()
     pairs: list[tuple[str, str]] = []
     metas: list[dict] = []
-    for qid in train_qids:
-        q = by_qid.get(qid)
-        if not q:
+    for u, a, meta in iter_longmemeval_train_rounds(data_path, train_qids):
+        key = normalize_text(u) + "\n|\n" + normalize_text(a)
+        if key in seen:
             continue
-        sessions = q["haystack_sessions"]
-        dates = q["haystack_dates"]
-        sids = q.get(
-            "haystack_session_ids",
-            [str(i) for i in range(len(sessions))],
-        )
-        for session, date, sid in zip(sessions, dates, sids):
-            i = 0
-            round_idx = 0
-            while i < len(session):
-                if (
-                    i + 1 < len(session)
-                    and session[i]["role"] == "user"
-                    and session[i + 1]["role"] == "assistant"
-                ):
-                    u = session[i]["content"].strip()
-                    a = session[i + 1]["content"].strip()
-                    key = f"{u}\n|\n{a}"
-                    if key not in seen_texts:
-                        seen_texts.add(key)
-                        pairs.append((u, a))
-                        metas.append({
-                            "source_qid": qid,
-                            "source_session_id": sid,
-                            "source_date": date,
-                            "round_index": round_idx,
-                        })
-                    i += 2
-                    round_idx += 1
-                else:
-                    i += 1
+        seen.add(key)
+        pairs.append((u, a))
+        # Back-compat: original meta fields the rest of this script reads.
+        metas.append({
+            "source_qid": meta["source_qid"],
+            "source_session_id": meta["source_session_id"],
+            "source_date": meta["source_date"],
+            "round_index": meta["round_index"],
+        })
     return pairs, metas
 
 

@@ -264,6 +264,48 @@ Open before coding: which attacker LLM, what prompt, what BoN budget, does the e
 - Part 3 — Docs rewrite for hubs-primary framing — **done** (this document + [direction.md](direction.md)).
 - Part 4 — Stage B text realization — **next**. Scope sketched above. User wants to focus on this next session; minimal first cut is ~200 lines code + eval_hubs.py patch. Stage B design questions to discuss before implementation.
 
+## Stage B results (2026-04-24 overnight)
+
+All three Stage B methods evaluated on test split (n=54, GPT-4o judge):
+
+| method | acc_Δ | cnf_Δ | recall acc_Δ | cos-to-hub | hub/top |
+|---|---:|---:|---:|---:|---:|
+| **retrieval** | **+14.8pp** | +3.7pp | **+14.0pp** | 0.549 | 2.48 |
+| grad (HotFlip) | +11.1pp | +3.7pp | +12.0pp | 0.718 | 3.24 |
+| BoN | +9.3pp | +1.9pp | +8.0pp | 0.680 | 3.07 |
+
+**Key findings:**
+
+1. **Retrieval wins.** Natural human-written chat turns from the train-split corpus, picked by cos-to-hub, produce the largest accuracy drop. No generation, no optimization, no adversarial content.
+2. **Cos-to-hub does NOT predict attack effectiveness.** Retrieval has the lowest cos (0.55) but the biggest drop. Above ~0.5, additional cos doesn't buy more reader-layer damage.
+3. **Displacement gap between vector and text modes is small.** Stage A K30 placeholder (privileged): +18pp recall drop. Stage B retrieval (realistic): +14pp recall drop. Only ~4pp lost to the naturalness constraint.
+4. **Per-task specialization.** Retrieval crushes temporal-reasoning (+28.6pp); BoN crushes knowledge-update (+22pp) and single-session-assistant (+33pp); grad is balanced but mediocre. Suggests a blended attack.
+
+## Honest assessment: the numbers are modest
+
+Stage A K30 prompt_injection (vector-mode, privileged, weaponized): +20.4pp acc drop, +31.5pp cnf drop.
+Stage B retrieval (realistic text-mode, no weaponization): +14.8pp acc drop, +3.7pp cnf drop.
+
+For comparison, the corpus-poisoning literature (Zhong 2023, PoisonedRAG) reports 5-20pp downstream accuracy drops against modern readers — our numbers are in line. The attack is real but doesn't *devastate* the memory system. This is because the bottleneck is the answer model's synthesis capability, not the retrieval-layer attack (which is near-complete: hubs occupy 30-50% of top-k for essentially all queries).
+
+**Options to push the numbers further, ordered by expected return per effort:**
+
+1. **Text-mode K scaling (K=60, K=100) — cheap, ~$0.35, ~1 hr.** Vector-mode saturated at K=30 because the reader pattern-matched spam. Text-mode with real retrieved chat turns doesn't trigger that heuristic. Plausible path to 25-30pp drops.
+2. **Cross-architecture (attack full_history) — ~3 hrs.** full_history puts everything in context. Poison is always read. Probably gets 40-60pp drops trivially. Opens the "architecture vulnerability profile" story that might carry the thesis.
+3. **Multi-chunk sessions per hub — ~2-3 hrs.** Each hub injects 3-5 correlated rounds instead of 1. Triples effective slot claim per K-unit.
+4. **Cross-victim (attack a larger / less-RLHF-trained model) — ~3 hrs.** Model-size / instruction-tuning sensitivity is a legitimate characterization direction.
+5. **Move to LongMemEval_M (larger haystacks) — half day.** More budget headroom. Also better "scale" story.
+6. **Relax threat model to "attacker knows question category" — ~1-2 hrs.** Per-category tuning. Still well within realistic. Could hit 25-35pp.
+7. **RL the Stage B generator — week+.** Probably not worth it given retrieval already beats BoN and grad.
+
+**Fallback reframe if none of the above moves the needle:**
+
+> "Modern instruction-tuned retrieval-augmented memory systems are substantially more robust to geometric adversarial attacks than corpus-poisoning literature predicts. Near-complete retrieval-layer attack (hubs occupy 30-50% of top-k) yields modest downstream accuracy drops (10-15pp realistic text-mode). We identify which attack components transfer from the privileged vector-mode upper bound and which do not, and derive bounds that inform defense design."
+
+That's a defense-leaning characterization paper. The modest numbers become the point rather than an apology.
+
+**Decided next:** TBD. User inclined to push for more oomph before committing to a writeup. Likely targets: (1) and (2) above as highest-ROI experiments.
+
 ## Tonight's session summary (2026-04-23)
 
 Kicked off the pivot from REINFORCE to hubness. Sequence:
@@ -274,14 +316,8 @@ Kicked off the pivot from REINFORCE to hubness. Sequence:
 5. Added three payload modes: `placeholder`, `contradictory`, `prompt_injection`.
 6. Test split + GPT-4o: locked in headline numbers, found 75% of the attack is pure displacement.
 7. Rewrote ATTACK.md and direction.md for the new framing.
-
-**Key decisions made tonight:**
-- REINFORCE (under [attack/](attack/)) is parked permanently. Hubs is the primary track.
-- Confident-answer rate is the primary attack metric, not overall accuracy.
-- The displacement effect is the main contribution — the text carried by hubs matters less than expected.
-- Stage B is next but unscoped in code.
-
-**Thesis path still TBD** — I sketched three options in [direction.md](direction.md#phased-execution-revised). User was too tired to decide tonight; picking this up next session.
+8. Built Stage B: save_hubs, retrieval, BoN, HotFlip-grad + eval_hubs text-mode patch.
+9. Overnight cluster run executed all three Stage B methods + test-split eval.
 
 ## Previous approach (REINFORCE, parked)
 

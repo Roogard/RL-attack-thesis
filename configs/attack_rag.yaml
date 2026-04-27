@@ -33,3 +33,26 @@ seed: 0
 output_dir: results/rl_attacker/rag_v1
 log_every: 10
 ckpt_every: 500
+
+# ── Stage B corpus pipeline (attacks/hubness/stage_b_corpus.py) ────────
+corpora:
+  root: data/corpora
+  ids:
+    - nl_web
+    - nl_memory
+    - nl_persona
+    - synth_generic
+    - synth_topic
+    - synth_persona
+    - adv_inject
+    - adv_confuse
+    - adv_optimized
+
+fitness:
+  alpha: 1.0          # weight on cos_to_hub (normalized within per-hub top-N)
+  beta: 1.0           # weight on RPR (normalized within per-hub top-N)
+  top_n: 200          # per-hub candidate pool size to RPR-rerank
+  scoring_pool_size: 10
+  scoring_pool_split: val
+  scoring_pool_seed: 0
+  scoring_pool_path: results/stage_b_corpus/scoring_pool.pkl

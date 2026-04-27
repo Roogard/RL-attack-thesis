@@ -132,6 +132,87 @@ def ask_qwen_batch(contexts, questions, question_dates):
     return [t.strip() for t in texts]
 
 
+def score_logprobs_batch(
+    contexts: list[str],
+    questions: list[str],
+    question_dates: list[str],
+    target_responses: list[str],
+    batch_size: int = 32,
+) -> list[float]:
+    """Sum log P_reader(target_response | context, question) under Qwen2.5-3B.
+
+    Used by the corpus reader-perplexity-ratio (RPR) scorer in
+    `attacks/hubness/reader_ppx.py`. Returns one float per row: the sum of
+    per-token log-probs of `target_responses[i]` when appended to the
+    chat-templated answer prompt for `contexts[i] / questions[i]`.
+
+    Implementation: builds the same chat prompt as `ask_qwen_batch`, then
+    appends the target response tokens AFTER the assistant generation prefix.
+    Calls vLLM with `prompt_logprobs=1, max_tokens=1` so the engine reports
+    the log-prob of every prompt token under the model. We sum the log-probs
+    of the appended target tokens.
+
+    The list inputs must all have the same length B = len(contexts).
+    """
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    assert len({len(contexts), len(questions), len(question_dates), len(target_responses)}) == 1, \
+        "score_logprobs_batch: all input lists must be the same length"
+
+    engine, tokenizer = _vllm_engines.get_answer_engine()
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    out: list[float] = [0.0] * len(contexts)
+    for start in range(0, len(contexts), batch_size):
+        end = min(start + batch_size, len(contexts))
+        prompt_inputs = []
+        target_lengths: list[int] = []
+        for i in range(start, end):
+            messages = _build_answer_messages(contexts[i], questions[i], question_dates[i])
+            prefix_text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+            prefix_ids = tokenizer(prefix_text, add_special_tokens=False)["input_ids"]
+            target_ids = tokenizer(
+                target_responses[i], add_special_tokens=False,
+            )["input_ids"]
+            full_ids = list(prefix_ids) + list(target_ids)
+            prompt_inputs.append(TokensPrompt(prompt_token_ids=full_ids))
+            target_lengths.append(len(target_ids))
+
+        params = SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            prompt_logprobs=1,
+        )
+        results = engine.generate(prompt_inputs, params, use_tqdm=False)
+        for j, (res, t_len) in enumerate(zip(results, target_lengths)):
+            # vLLM returns prompt_logprobs aligned with prompt_token_ids.
+            # The first position is None (no prior token). Slice the last
+            # `t_len` positions — those are the appended target tokens — and
+            # sum the log-prob of the actually-chosen token at each.
+            plp = res.prompt_logprobs or []
+            full_ids = res.prompt_token_ids
+            tgt_slice = list(range(len(full_ids) - t_len, len(full_ids)))
+            total = 0.0
+            for pos in tgt_slice:
+                tok_id = full_ids[pos]
+                lp_dict = plp[pos] if pos < len(plp) else None
+                if not lp_dict or tok_id not in lp_dict:
+                    # Token wasn't in the top-1 returned slot. Approximate
+                    # with -log(vocab_size) as a floor; in practice the
+                    # actual prompt token is always reported by vLLM when
+                    # prompt_logprobs=1 (it returns true_token + top-1).
+                    total += -20.0
+                    continue
+                lp = lp_dict[tok_id]
+                total += float(lp.logprob if hasattr(lp, "logprob") else lp)
+            out[start + j] = total
+    return out
+
+
 # ── Answer Judging — GPT-4o (final eval only) ────────────────────────────────
 
 @backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APIError))
