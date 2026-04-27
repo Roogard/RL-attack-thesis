@@ -1,14 +1,15 @@
 """nl_web — open web-chat corpora.
 
 WildChat-1M and LMSYS-Chat-1M are gated on HuggingFace. Per the plan
-("if anything is gated, just get a different dataset"), we substitute:
+("if anything is gated, just get a different dataset"), we use:
 
 - HuggingFaceH4/ultrachat_200k (open; ~200K multi-turn instruction chats)
-- anon8231489123/ShareGPT_Vicuna_unfiltered (open mirror of ShareGPT)
+- anon8231489123/ShareGPT_Vicuna_unfiltered (open mirror; non-standard
+  HF layout — disabled by default because the auto-inferred Parquet
+  loader can't parse it. Set --sharegpt_max > 0 to attempt anyway; if
+  it fails the build still yields whatever the other sources produced.)
 
-Both yield (user, assistant) rounds via streaming. The point is broad
-stylistic coverage of the embedding space — not faithfulness to any
-particular chat distribution.
+Each source is wrapped so one bad loader doesn't kill the whole corpus.
 """
 from __future__ import annotations
 
@@ -66,20 +67,38 @@ def _iter_sharegpt(max_rounds: int) -> Iterator[tuple[str, str, dict]]:
                     return
 
 
+def _safe(name: str, gen):
+    """Wrap a source iterator so its failure logs and yields nothing,
+    instead of killing the whole corpus build.
+    """
+    try:
+        for r in gen:
+            yield r
+    except Exception as e:
+        print(f"[nl_web] WARNING: source {name!r} failed: {type(e).__name__}: {e}",
+              flush=True)
+
+
 def build(
     out_path: str,
     ultrachat_max: int = 800_000,
-    sharegpt_max: int = 700_000,
+    sharegpt_max: int = 0,
     **_,
 ) -> dict:
+    sources_used: list[str] = []
+
     def stream():
-        for r in _iter_ultrachat(ultrachat_max):
-            yield r
-        for r in _iter_sharegpt(sharegpt_max):
-            yield r
+        if ultrachat_max > 0:
+            sources_used.append("ultrachat_200k")
+            for r in _safe("ultrachat_200k", _iter_ultrachat(ultrachat_max)):
+                yield r
+        if sharegpt_max > 0:
+            sources_used.append("sharegpt_vicuna_unfiltered")
+            for r in _safe("sharegpt_vicuna_unfiltered", _iter_sharegpt(sharegpt_max)):
+                yield r
 
     summary = write_corpus_jsonl(out_path, stream(), dedup=True)
-    summary["sources"] = ["ultrachat_200k", "sharegpt_vicuna_unfiltered"]
+    summary["sources"] = sources_used
     summary["caps"] = {"ultrachat": ultrachat_max, "sharegpt": sharegpt_max}
     return summary
 
@@ -88,7 +107,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--out", default="data/corpora/nl_web.jsonl")
     p.add_argument("--ultrachat_max", type=int, default=800_000)
-    p.add_argument("--sharegpt_max", type=int, default=700_000)
+    p.add_argument("--sharegpt_max", type=int, default=0,
+                   help="ShareGPT mirror has non-standard HF layout; off by default")
     args = p.parse_args()
     s = build(args.out, ultrachat_max=args.ultrachat_max, sharegpt_max=args.sharegpt_max)
     print(s)
