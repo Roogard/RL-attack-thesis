@@ -1,3 +1,4 @@
+import os
 import uuid
 
 import chromadb
@@ -20,7 +21,14 @@ class RAGMemory(MemoryStore):
 
     def __init__(self, model_name="all-MiniLM-L6-v2"):
         self._collection_name = f"memory_{uuid.uuid4().hex}"
-        self._ef = SentenceTransformerEmbeddingFunction(model_name=model_name)
+        # RAG_ENCODER_DEVICE=cpu unblocks reader_ppx: MiniLM on GPU initializes
+        # CUDA in the parent before vLLM spawns EngineCore, which then fails
+        # with cudaErrorInitializationError. Default None ⇒ ST picks GPU.
+        device = os.environ.get("RAG_ENCODER_DEVICE")
+        ef_kwargs = {"model_name": model_name}
+        if device:
+            ef_kwargs["device"] = device
+        self._ef = SentenceTransformerEmbeddingFunction(**ef_kwargs)
         self._client = chromadb.Client()
         self._collection = self._client.create_collection(
             name=self._collection_name, embedding_function=self._ef
