@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
+import subprocess
 import sys
 from pathlib import Path
 
@@ -57,26 +58,29 @@ REFUSAL_POOL: tuple[str, ...] = (
 
 # ── scoring-pool fixture ────────────────────────────────────────────────
 
-def build_scoring_pool(
+def _contexts_path(out_path: str) -> str:
+    """Where phase 1 stashes its intermediate output."""
+    return out_path + ".contexts"
+
+
+def build_clean_contexts(
     config_path: str,
-    split: str = "val",
-    n_questions: int = 10,
-    seed: int = 0,
-    out_path: str = "results/stage_b_corpus/scoring_pool.pkl",
+    split: str,
+    n_questions: int,
+    seed: int,
+    out_path: str,
 ) -> dict:
-    """Materialize a fixed scoring pool from the val split.
+    """Phase 1: index n questions and save clean retrieval contexts.
 
-    For each picked question:
-      - run RAGMemory(haystack) → retrieve(top_k clean context)
-      - record (question, question_date, question_type, clean_ctx)
-      - score baseline log P(refusal | clean_ctx, q) for every refusal
-        phrase in REFUSAL_POOL
+    Writes an intermediate pickle (out_path + '.contexts') with everything
+    except baselines. Phase 2 reads this and computes the vLLM log-probs.
 
-    Persists a pickle so the slower per-corpus RPR loops can read the
-    baselines without re-encoding the haystack or re-running the reader.
+    Run as a separate subprocess from phase 2 so the parent doing the
+    sentence-transformers / chromadb imports does not have CUDA state
+    when vLLM tries to spawn EngineCore — that combo throws
+    cudaErrorInitializationError on shared GPU hosts.
     """
     from memory.rag import RAGMemory
-    from harness import score_logprobs_batch
 
     with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -90,7 +94,8 @@ def build_scoring_pool(
     rng = np.random.default_rng(seed)
     rng.shuffle(qids)
     picked = qids[:n_questions]
-    print(f"[reader_ppx] building scoring pool from {split} (n={len(picked)})")
+    print(f"[reader_ppx] phase 1: building scoring pool from {split} "
+          f"(n={len(picked)})")
 
     embed_model = cfg["embed_model"]
     top_k = cfg["top_k"]
@@ -122,17 +127,55 @@ def build_scoring_pool(
         if (vi + 1) % 2 == 0:
             print(f"  ({vi+1}/{len(picked)}) qid={qid} indexed + retrieved")
 
-    # Baseline log P(refusal | clean_ctx, q) for every (question, refusal).
-    print(f"[reader_ppx] computing baselines: "
-          f"{len(picked)} questions × {len(REFUSAL_POOL)} refusals")
+    out = {
+        "split": split,
+        "qids": picked,
+        "questions": questions,
+        "dates": dates,
+        "qtypes": qtypes,
+        "contexts": contexts,
+        "refusal_pool": list(REFUSAL_POOL),
+        "baselines": None,
+        "embed_model": embed_model,
+        "top_k": top_k,
+    }
+    ctx_path = _contexts_path(out_path)
+    Path(ctx_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(ctx_path, "wb") as f:
+        pickle.dump(out, f)
+    print(f"[reader_ppx] phase 1: wrote contexts → {ctx_path}")
+    return out
+
+
+def compute_baselines(out_path: str) -> dict:
+    """Phase 2: load contexts pickle, run vLLM, write final scoring_pool.
+
+    Must run in a fresh interpreter — the parent must not have imported
+    sentence-transformers or otherwise initialized CUDA before vLLM
+    spawns its EngineCore subprocess.
+    """
+    from harness import score_logprobs_batch
+
+    ctx_path = _contexts_path(out_path)
+    with open(ctx_path, "rb") as f:
+        pool = pickle.load(f)
+
+    qids = pool["qids"]
+    questions = pool["questions"]
+    dates = pool["dates"]
+    contexts = pool["contexts"]
+    refusal_pool = pool["refusal_pool"]
+
+    print(f"[reader_ppx] phase 2: computing baselines: "
+          f"{len(qids)} questions × {len(refusal_pool)} refusals")
     baselines: dict[tuple[str, str], float] = {}
     flat_q: list[str] = []
     flat_d: list[str] = []
     flat_c: list[str] = []
     flat_r: list[str] = []
-    keymap: list[tuple[str, str]] = []  # parallel index → (qid, refusal)
-    for qid, q, d, ctx in zip(picked, questions, dates, contexts):
-        for r in REFUSAL_POOL:
+    keymap: list[tuple[str, str]] = []
+    for qid, q, d, ctx in zip(qids, questions, dates, contexts):
+        for r in refusal_pool:
             flat_q.append(q)
             flat_d.append(d)
             flat_c.append(ctx)
@@ -142,23 +185,47 @@ def build_scoring_pool(
     for k, lp in zip(keymap, lps):
         baselines[k] = lp
 
-    out = {
-        "split": split,
-        "qids": picked,
-        "questions": questions,
-        "dates": dates,
-        "qtypes": qtypes,
-        "contexts": contexts,
-        "refusal_pool": list(REFUSAL_POOL),
-        "baselines": baselines,
-        "embed_model": embed_model,
-        "top_k": top_k,
-    }
+    pool["baselines"] = baselines
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
-        pickle.dump(out, f)
-    print(f"[reader_ppx] wrote scoring pool → {out_path}")
-    return out
+        pickle.dump(pool, f)
+    print(f"[reader_ppx] phase 2: wrote scoring pool → {out_path}")
+
+    try:
+        Path(ctx_path).unlink()
+    except OSError:
+        pass
+    return pool
+
+
+def build_scoring_pool(
+    config_path: str,
+    split: str = "val",
+    n_questions: int = 10,
+    seed: int = 0,
+    out_path: str = "results/stage_b_corpus/scoring_pool.pkl",
+) -> dict:
+    """Backwards-compatible wrapper: runs phase 1 then phase 2 in two
+    fresh subprocesses, so the vLLM phase has a clean parent.
+
+    See `build_clean_contexts` and `compute_baselines` for the split.
+    """
+    base = [sys.executable, "-m", "attacks.hubness.reader_ppx",
+            "--out", out_path]
+    rc = subprocess.call(base + [
+        "--phase", "contexts",
+        "--config", config_path,
+        "--split", split,
+        "--n_questions", str(n_questions),
+        "--seed", str(seed),
+    ])
+    if rc != 0:
+        raise SystemExit(f"[reader_ppx] phase 1 exited with code {rc}")
+    rc = subprocess.call(base + ["--phase", "baselines"])
+    if rc != 0:
+        raise SystemExit(f"[reader_ppx] phase 2 exited with code {rc}")
+    with open(out_path, "rb") as f:
+        return pickle.load(f)
 
 
 def load_scoring_pool(path: str) -> dict:
@@ -242,11 +309,28 @@ if __name__ == "__main__":
     p.add_argument("--n_questions", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="results/stage_b_corpus/scoring_pool.pkl")
+    p.add_argument("--phase", choices=["contexts", "baselines", "all"],
+                   default="all",
+                   help="'contexts' = phase 1 (no vLLM), "
+                        "'baselines' = phase 2 (vLLM only), "
+                        "'all' = drives both as separate subprocesses")
     args = p.parse_args()
-    build_scoring_pool(
-        config_path=args.config,
-        split=args.split,
-        n_questions=args.n_questions,
-        seed=args.seed,
-        out_path=args.out,
-    )
+
+    if args.phase == "contexts":
+        build_clean_contexts(
+            config_path=args.config,
+            split=args.split,
+            n_questions=args.n_questions,
+            seed=args.seed,
+            out_path=args.out,
+        )
+    elif args.phase == "baselines":
+        compute_baselines(out_path=args.out)
+    else:
+        build_scoring_pool(
+            config_path=args.config,
+            split=args.split,
+            n_questions=args.n_questions,
+            seed=args.seed,
+            out_path=args.out,
+        )
