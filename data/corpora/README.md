@@ -17,14 +17,31 @@ which should already be present from the existing project.
 
 ## 0. Pre-flight
 
-The corpora list is open-only. Two of the originally-planned datasets
-(WildChat-1M, LMSYS-Chat-1M) are gated and were swapped for
-UltraChat-200k + ShareGPT-Vicuna-Unfiltered. No HF login required.
+All nine corpora are **free** — no HF login, no gated datasets. WildChat-1M
+and LMSYS-Chat-1M were originally planned but are gated; they were
+dropped in favor of open replacements.
+
+| corpus | needs | source | notes |
+|---|---|---|---|
+| `nl_web` | network | UltraChat-200k | ShareGPT mirror is wired in but **off by default** (`sharegpt_max=0`) — its HF parquet layout breaks auto-loading. UltraChat alone is fine. |
+| `nl_memory` | network + repo data | Soda + LongMemEval train rounds | LongMemEval is the local submodule. |
+| `nl_persona` | network | personachat_truecased + daily_dialog + oasst1 + hh-rlhf | `daily_dialog` needs `trust_remote_code=True` (already set). |
+| `synth_generic` | **GPU** (vLLM Qwen2.5-3B) | LLM-generated, no external data | |
+| `synth_topic` | **GPU** + `hubs_K30.pkl` | LLM-generated, hub-conditioned | Needs hubs built first. |
+| `synth_persona` | **GPU** + network | PersonaHub stream + LLM | |
+| `adv_inject` | none | pure templates | Instant. |
+| `adv_confuse` | none | pure templates | Instant. |
+| `adv_optimized` | **GPU** | adversarial system prompt + LLM | |
 
 If you ever want to add WildChat or LMSYS-Chat back in:
 - `huggingface-cli login`
 - Accept the dataset's terms on its HF page
 - Add the loader inside `attacks/corpora/nl_web.py`
+
+**Preconditions** before any selection/eval step:
+- `results/stage_a/hubs_K30.pkl` — build with `python scripts/save_hubs.py --K 30 --out results/stage_a/hubs_K30.pkl`. Required by `synth_topic`, `stage_b_corpus`, and `eval_hubs`.
+- `configs/splits/rag_attack.json` — already in repo.
+- `LongMemEval/data/longmemeval_s_cleaned.json` — submodule data.
 
 Disk: budget ~30 GB for raw JSONL + ~15 GB per encoded `.npy` (cached
 under `results/stage_b_corpus/encodings/`).
