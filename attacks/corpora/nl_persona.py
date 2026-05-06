@@ -20,6 +20,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from attacks.hubness.stage_b_common import write_corpus_jsonl
 
 
+def _safe(name: str, gen):
+    """Wrap a source iterator so its failure logs and yields nothing,
+    instead of killing the whole corpus build. Mirrors nl_web._safe.
+    """
+    try:
+        for r in gen:
+            yield r
+    except Exception as e:
+        print(f"[nl_persona] WARNING: source {name!r} failed: {type(e).__name__}: {e}",
+              flush=True)
+
+
 def _iter_personachat(max_rounds: int) -> Iterator[tuple[str, str, dict]]:
     from datasets import load_dataset
     ds = load_dataset(
@@ -134,13 +146,13 @@ def build(
     **_,
 ) -> dict:
     def stream():
-        for r in _iter_personachat(personachat_max):
+        for r in _safe("personachat_truecased", _iter_personachat(personachat_max)):
             yield r
-        for r in _iter_dailydialog(dailydialog_max):
+        for r in _safe("daily_dialog", _iter_dailydialog(dailydialog_max)):
             yield r
-        for r in _iter_oasst1(oasst_max):
+        for r in _safe("oasst1", _iter_oasst1(oasst_max)):
             yield r
-        for r in _iter_hh_rlhf(hhrlhf_max):
+        for r in _safe("hh_rlhf", _iter_hh_rlhf(hhrlhf_max)):
             yield r
 
     summary = write_corpus_jsonl(out_path, stream(), dedup=True)
