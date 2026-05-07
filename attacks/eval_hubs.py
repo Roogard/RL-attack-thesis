@@ -446,21 +446,29 @@ def main():
                 # Two record shapes are supported:
                 #   single-round (BoN/grad): {hub_idx, user_msg, assistant_msg, ...}
                 #   multi-round (retrieval ≥ M=1): {hub_idx, rounds: [...]}
+                #
+                # For multi-round records, each round is emitted as its own
+                # 1-round session (Option B packaging) — distinct session_id
+                # per round so the reader doesn't see them as one coherent
+                # multi-round user-history segment. M=1 records are unaffected.
                 poison_sessions = []
                 poison_sids = []
                 for s in poison_data["sessions"]:
                     if "rounds" in s:
-                        turns = []
-                        for r in s["rounds"]:
-                            turns.append({"role": "user", "content": r["user_msg"]})
-                            turns.append({"role": "assistant", "content": r["assistant_msg"]})
+                        for ridx, r in enumerate(s["rounds"]):
+                            poison_sessions.append([
+                                {"role": "user", "content": r["user_msg"]},
+                                {"role": "assistant", "content": r["assistant_msg"]},
+                            ])
+                            poison_sids.append(
+                                f"POISON_STAGE_B_{s['hub_idx']}_r{ridx}"
+                            )
                     else:
-                        turns = [
+                        poison_sessions.append([
                             {"role": "user", "content": s["user_msg"]},
                             {"role": "assistant", "content": s["assistant_msg"]},
-                        ]
-                    poison_sessions.append(turns)
-                    poison_sids.append(f"POISON_STAGE_B_{s['hub_idx']}")
+                        ])
+                        poison_sids.append(f"POISON_STAGE_B_{s['hub_idx']}")
                 # Use far-future date so poison chunks sort last in the
                 # chronological post-retrieve reorder; Chroma's top-k
                 # selection is unaffected by date.
