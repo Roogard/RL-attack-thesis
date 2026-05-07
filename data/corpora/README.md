@@ -32,6 +32,9 @@ dropped in favor of open replacements.
 | `adv_inject` | none | pure templates | Instant. |
 | `adv_confuse` | none | pure templates | Instant. |
 | `adv_optimized` | **GPU** | adversarial system prompt + LLM | |
+| `adv_manyshot_refuse` | none | pure templates | Many-shot in-context refusal demos. |
+| `adv_harmful_wrapped` | network | AdvBench + HarmBench wrapped in memory framing | Public refusal-trigger benchmarks. |
+| `adv_greshake_avail` | none | pure templates | Greshake-style availability/DoS injection. |
 
 If you ever want to add WildChat or LMSYS-Chat back in:
 - `huggingface-cli login`

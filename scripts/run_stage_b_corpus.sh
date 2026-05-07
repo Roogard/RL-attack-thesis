@@ -15,7 +15,8 @@ TOP_N=${TOP_N:-200}
 
 CORPORA=(nl_web nl_memory nl_persona
          synth_generic synth_topic synth_persona
-         adv_inject adv_confuse adv_optimized)
+         adv_inject adv_confuse adv_optimized
+         adv_manyshot_refuse adv_harmful_wrapped adv_greshake_avail)
 
 mkdir -p "${OUT_DIR}" data/corpora
 
@@ -31,6 +32,9 @@ build_corpora() {
   python -m attacks.corpora.adv_inject    --out data/corpora/adv_inject.jsonl
   python -m attacks.corpora.adv_confuse   --out data/corpora/adv_confuse.jsonl
   python -m attacks.corpora.adv_optimized --out data/corpora/adv_optimized.jsonl
+  python -m attacks.corpora.adv_manyshot_refuse --out data/corpora/adv_manyshot_refuse.jsonl
+  python -m attacks.corpora.adv_harmful_wrapped --out data/corpora/adv_harmful_wrapped.jsonl
+  python -m attacks.corpora.adv_greshake_avail  --out data/corpora/adv_greshake_avail.jsonl
 }
 
 build_scoring_pool() {

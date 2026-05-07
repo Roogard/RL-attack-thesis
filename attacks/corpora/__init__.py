@@ -19,15 +19,18 @@ dataset isn't reachable; they don't silently produce an empty corpus.
 
 Default registry — IDs match plan and CLI flags:
 
-    nl_web         attacks.corpora.nl_web
-    nl_memory      attacks.corpora.nl_memory
-    nl_persona     attacks.corpora.nl_persona
-    synth_generic  attacks.corpora.synth_generic
-    synth_topic    attacks.corpora.synth_topic
-    synth_persona  attacks.corpora.synth_persona
-    adv_inject     attacks.corpora.adv_inject
-    adv_confuse    attacks.corpora.adv_confuse
-    adv_optimized  attacks.corpora.adv_optimized
+    nl_web                 attacks.corpora.nl_web
+    nl_memory              attacks.corpora.nl_memory
+    nl_persona             attacks.corpora.nl_persona
+    synth_generic          attacks.corpora.synth_generic
+    synth_topic            attacks.corpora.synth_topic
+    synth_persona          attacks.corpora.synth_persona
+    adv_inject             attacks.corpora.adv_inject
+    adv_confuse            attacks.corpora.adv_confuse
+    adv_optimized          attacks.corpora.adv_optimized
+    adv_manyshot_refuse    attacks.corpora.adv_manyshot_refuse
+    adv_harmful_wrapped    attacks.corpora.adv_harmful_wrapped
+    adv_greshake_avail     attacks.corpora.adv_greshake_avail
 """
 from __future__ import annotations
 
@@ -45,6 +48,9 @@ CORPUS_IDS: tuple[str, ...] = (
     "adv_inject",
     "adv_confuse",
     "adv_optimized",
+    "adv_manyshot_refuse",
+    "adv_harmful_wrapped",
+    "adv_greshake_avail",
 )
 
 
