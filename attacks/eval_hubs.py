@@ -242,12 +242,15 @@ def main():
     p.add_argument("--output", required=True)
     p.add_argument("--use_gpt4o", action="store_true",
                    help="Also run the GPT-4o judge on clean+poisoned answers.")
-    p.add_argument("--poison_file", default=None,
-                   help="Stage B text-mode attack: path to a JSON from "
-                        "attacks/hubness/stage_b_*.py. When set, hub vectors "
-                        "are NOT injected directly; instead the (user,assistant) "
-                        "sessions in the file are indexed through the defender's "
-                        "encoder via mem.index() — the realistic text-mode path. "
+    p.add_argument("--poison_file", default=None, nargs="+",
+                   help="Stage B text-mode attack: one or more paths to JSON "
+                        "files from attacks/hubness/stage_b_*.py. When set, "
+                        "hub vectors are NOT injected directly; instead the "
+                        "(user,assistant) sessions in each file are indexed "
+                        "through the defender's encoder via mem.index() — the "
+                        "realistic text-mode path. With multiple paths, every "
+                        "config is evaluated against the SAME clean baseline "
+                        "per qid (noise-free cross-config comparison). "
                         "Vector-mode args (--K_values, --payloads, --hub_scope) "
                         "are ignored in this mode.")
     args = p.parse_args()
@@ -288,24 +291,32 @@ def main():
     # Everything downstream (answer generation, judging, aggregation) stays
     # the same; the only difference is one config per run and one mem.index
     # call per qid in place of the index_raw_embeddings loop.
-    poison_data: dict | None = None
+    # poison_by_stem maps each --poison_file's filename-stem to the loaded
+    # poison_data dict. Stem becomes the per-config "payload" identifier in
+    # config_keys, output JSON, and CSV. With N files, all N are evaluated
+    # against the SAME clean baseline per qid (one clean retrieve, N poisoned
+    # retrieves), eliminating cross-run vLLM-stochasticity noise.
+    poison_by_stem: dict[str, dict] = {}
     if args.poison_file:
         from attacks.hubness.stage_b_common import read_poison_file
-        poison_data = read_poison_file(args.poison_file)
-        # Multi-round files carry M; legacy single-round (BoN/grad) implicitly M=1.
-        poison_M = poison_data.get("M", 1)
-        total_chunks = poison_data.get(
-            "total_chunks_injected",
-            poison_data["K"] * poison_M,
-        )
-        print(
-            f"[eval_hubs] TEXT-MODE attack from {args.poison_file}"
-            f"  method={poison_data['method']}  K={poison_data['K']}  "
-            f"M={poison_M}  total_chunks={total_chunks}  "
-            f"mean_cos={poison_data.get('mean_cos_to_hub')}"
-        )
-        # Override any vector-mode args to a single text-mode config.
-        config_keys = [("text", Path(args.poison_file).stem)]
+        for pf in args.poison_file:
+            stem = Path(pf).stem
+            if stem in poison_by_stem:
+                raise SystemExit(
+                    f"Duplicate poison-file stem {stem!r} (from {pf}). Stems "
+                    f"must be unique because they're used as config keys."
+                )
+            d = read_poison_file(pf)
+            poison_by_stem[stem] = d
+            poison_M = d.get("M", 1)
+            total_chunks = d.get("total_chunks_injected", d["K"] * poison_M)
+            print(
+                f"[eval_hubs] TEXT-MODE attack from {pf}"
+                f"  stem={stem}  method={d['method']}  K={d['K']}  "
+                f"M={poison_M}  total_chunks={total_chunks}  "
+                f"mean_cos={d.get('mean_cos_to_hub')}"
+            )
+        config_keys = [("text", stem) for stem in poison_by_stem]
 
     Q_val: np.ndarray | None = None
     hubs_by_K: dict[int, np.ndarray] = {}
@@ -451,6 +462,12 @@ def main():
                 # 1-round session (Option B packaging) — distinct session_id
                 # per round so the reader doesn't see them as one coherent
                 # multi-round user-history segment. M=1 records are unaffected.
+                #
+                # Session-ids are namespaced by config stem so that a single
+                # eval_hubs run with multiple poison files (e.g. retrieval_K30_M3
+                # and retrieval_K30_M3_PI) doesn't collide on Chroma IDs.
+                stem = cfg_key[1]
+                poison_data = poison_by_stem[stem]
                 poison_sessions = []
                 poison_sids = []
                 for s in poison_data["sessions"]:
@@ -461,14 +478,14 @@ def main():
                                 {"role": "assistant", "content": r["assistant_msg"]},
                             ])
                             poison_sids.append(
-                                f"POISON_STAGE_B_{s['hub_idx']}_r{ridx}"
+                                f"POISON_{stem}_h{s['hub_idx']}_r{ridx}"
                             )
                     else:
                         poison_sessions.append([
                             {"role": "user", "content": s["user_msg"]},
                             {"role": "assistant", "content": s["assistant_msg"]},
                         ])
-                        poison_sids.append(f"POISON_STAGE_B_{s['hub_idx']}")
+                        poison_sids.append(f"POISON_{stem}_h{s['hub_idx']}")
                 # Use far-future date so poison chunks sort last in the
                 # chronological post-retrieve reorder; Chroma's top-k
                 # selection is unaffected by date.
