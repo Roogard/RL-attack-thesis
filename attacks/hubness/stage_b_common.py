@@ -38,6 +38,25 @@ class PoisonSessionRecord:
     meta: dict = field(default_factory=dict)
 
 
+@dataclass
+class MultiRoundPoisonSessionRecord:
+    """One attacker session containing M (user, assistant) rounds, all picked
+    for the same hub. M=1 collapses to PoisonSessionRecord but uses this
+    schema for uniform downstream handling.
+
+    `rounds` items each have keys: user_msg, assistant_msg, cos_to_hub.
+    """
+    hub_idx: int
+    rounds: list[dict]
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def mean_cos_to_hub(self) -> float:
+        if not self.rounds:
+            return 0.0
+        return float(sum(r["cos_to_hub"] for r in self.rounds) / len(self.rounds))
+
+
 def write_poison_file(
     path: str,
     method: str,

@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from attacks.hubness.stage_b_common import (
-    PoisonSessionRecord,
+    MultiRoundPoisonSessionRecord,
     encode_many,
     format_round_text,
     iter_longmemeval_train_rounds,
@@ -78,7 +78,14 @@ def main():
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--model", default=None,
                    help="Encoder override; defaults to hubs['model'].")
+    p.add_argument("--rounds_per_hub", type=int, default=1,
+                   help="M: number of corpus rounds picked per hub (top-M by "
+                        "cos-to-hub). M=1 reproduces the original single-pick "
+                        "behavior; M>1 builds one M-round session per hub so "
+                        "each hub's region claims M slots in top-k retrieval.")
     args = p.parse_args()
+    if args.rounds_per_hub < 1:
+        raise SystemExit("--rounds_per_hub must be >= 1")
 
     hubs_blob = load_hubs(args.hubs)
     H = hubs_blob["hubs"]
@@ -101,30 +108,63 @@ def main():
     vecs = encode_many(encoder, texts, batch_size=args.batch_size)
     print(f"  encoded in {time.time()-t0:.1f}s  (shape={vecs.shape})")
 
-    # For each hub, argmax cosine over the corpus.
-    print(f"[stage_b/retrieval] picking top-1 per hub ...")
+    # For each hub, take top-M by cosine over the corpus.
+    M = args.rounds_per_hub
+    if M > len(pairs):
+        raise SystemExit(
+            f"--rounds_per_hub={M} exceeds corpus size {len(pairs)}"
+        )
+    print(f"[stage_b/retrieval] picking top-{M} per hub "
+          f"({len(H)} hubs × {M} = {len(H) * M} chunks total) ...")
     sims = vecs @ H.T  # (n_corpus, K)
-    records: list[PoisonSessionRecord] = []
+    records: list[MultiRoundPoisonSessionRecord] = []
+    all_corpus_idxs: list[int] = []  # for cross-hub-dedup diagnostic
     for k in range(len(H)):
-        best_idx = int(sims[:, k].argmax())
-        best_cos = float(sims[best_idx, k])
-        u, a = pairs[best_idx]
-        records.append(PoisonSessionRecord(
+        col = sims[:, k]
+        # argpartition gets the M largest indices (unsorted); then sort that
+        # slice descending by sim to get a stable top-M ordering.
+        if M < len(col):
+            cand = np.argpartition(-col, M)[:M]
+        else:
+            cand = np.arange(len(col))
+        cand_sorted = cand[np.argsort(-col[cand])]
+        rounds = []
+        for j in cand_sorted:
+            j_int = int(j)
+            u, a = pairs[j_int]
+            rounds.append({
+                "user_msg": u,
+                "assistant_msg": a,
+                "cos_to_hub": float(col[j_int]),
+                "source": metas[j_int],
+            })
+            all_corpus_idxs.append(j_int)
+        records.append(MultiRoundPoisonSessionRecord(
             hub_idx=k,
-            user_msg=u,
-            assistant_msg=a,
-            cos_to_hub=best_cos,
-            meta={"retrieval": metas[best_idx]},
+            rounds=rounds,
+            meta={"M": M},
         ))
 
-    cos_values = np.array([r.cos_to_hub for r in records])
+    cos_values = np.array(
+        [r["cos_to_hub"] for rec in records for r in rec.rounds]
+    )
+    distinct_rounds = len(set(all_corpus_idxs))
     print(f"[stage_b/retrieval] cos to hub:  mean={cos_values.mean():.3f}  "
           f"min={cos_values.min():.3f}  max={cos_values.max():.3f}")
+    print(f"[stage_b/retrieval] distinct corpus rounds across all selections: "
+          f"{distinct_rounds} / {len(H) * M} "
+          f"({100.0 * distinct_rounds / max(len(H) * M, 1):.1f}% unique)")
 
     write_poison_file(
         args.out, method="retrieval", hubs_source=args.hubs,
         sessions=records,
-        extra={"corpus_size": len(pairs), "mean_cos_to_hub": float(cos_values.mean())},
+        extra={
+            "corpus_size": len(pairs),
+            "mean_cos_to_hub": float(cos_values.mean()),
+            "M": M,
+            "distinct_rounds_selected": distinct_rounds,
+            "total_chunks_injected": len(H) * M,
+        },
     )
     print(f"[stage_b/retrieval] wrote {args.out}")
 

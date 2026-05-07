@@ -292,9 +292,16 @@ def main():
     if args.poison_file:
         from attacks.hubness.stage_b_common import read_poison_file
         poison_data = read_poison_file(args.poison_file)
+        # Multi-round files carry M; legacy single-round (BoN/grad) implicitly M=1.
+        poison_M = poison_data.get("M", 1)
+        total_chunks = poison_data.get(
+            "total_chunks_injected",
+            poison_data["K"] * poison_M,
+        )
         print(
             f"[eval_hubs] TEXT-MODE attack from {args.poison_file}"
             f"  method={poison_data['method']}  K={poison_data['K']}  "
+            f"M={poison_M}  total_chunks={total_chunks}  "
             f"mean_cos={poison_data.get('mean_cos_to_hub')}"
         )
         # Override any vector-mode args to a single text-mode config.
@@ -435,20 +442,29 @@ def main():
                 # Stage B text-mode: index generated user/assistant rounds
                 # via the defender's normal RAGMemory.index() path — through
                 # the encoder, not around it.
-                poison_sessions = [
-                    [
-                        {"role": "user", "content": s["user_msg"]},
-                        {"role": "assistant", "content": s["assistant_msg"]},
-                    ]
-                    for s in poison_data["sessions"]
-                ]
+                #
+                # Two record shapes are supported:
+                #   single-round (BoN/grad): {hub_idx, user_msg, assistant_msg, ...}
+                #   multi-round (retrieval ≥ M=1): {hub_idx, rounds: [...]}
+                poison_sessions = []
+                poison_sids = []
+                for s in poison_data["sessions"]:
+                    if "rounds" in s:
+                        turns = []
+                        for r in s["rounds"]:
+                            turns.append({"role": "user", "content": r["user_msg"]})
+                            turns.append({"role": "assistant", "content": r["assistant_msg"]})
+                    else:
+                        turns = [
+                            {"role": "user", "content": s["user_msg"]},
+                            {"role": "assistant", "content": s["assistant_msg"]},
+                        ]
+                    poison_sessions.append(turns)
+                    poison_sids.append(f"POISON_STAGE_B_{s['hub_idx']}")
                 # Use far-future date so poison chunks sort last in the
                 # chronological post-retrieve reorder; Chroma's top-k
                 # selection is unaffected by date.
                 poison_dates = ["2099-12-31"] * len(poison_sessions)
-                poison_sids = [
-                    f"POISON_STAGE_B_{s['hub_idx']}" for s in poison_data["sessions"]
-                ]
                 mem.index(poison_sessions, poison_dates, poison_sids)
                 poisoned_ctx = mem.retrieve(q["question"], q["question_date"], top_k=top_k)
                 # Count chunks whose session_id marks them as poison-added.
