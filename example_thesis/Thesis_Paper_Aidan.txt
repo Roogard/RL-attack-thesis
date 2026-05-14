@@ -1,0 +1,1476 @@
+Exploring Compositional Adversarial Attacks
+    with BadVision on Multimodal LLMs
+
+         Master of Science in Computer Science Thesis
+                                      by
+
+                                 Dec 2025
+Contents
+
+1 Introduction                           1
+
+1.1 Background on Multimodal AI Systems . . . . . . . . . . . . . . 1
+
+1.1.1 Evolution of Large Language Models . . . . . . . . . . . . 1
+
+1.1.2 Vision-Language Models and Their Capabilities . . . . . . 2
+
+1.1.3 Modality-Agnostic Models . . . . . . . . . . . . . . . . . . 2
+
+1.2 Security in Machine Learning . . . . . . . . . . . . . . . . . . . . 3
+
+1.2.1 Backdoor Attacks and Trigger-Based Manipulation . . . . 4
+
+1.2.2 Vulnerabilities in Multimodal Models . . . . . . . . . . . 5
+
+1.3 Problem Statement . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+
+1.3.1 Research Questions and Objectives . . . . . . . . . . . . . 5
+
+1.3.2 Limitations of Current Multimodal Robustness Evaluations 6
+
+1.3.3 Need for Compositional Image-Text Attack Frameworks . 6
+
+1.4 Summary of Proposed Solution . . . . . . . . . . . . . . . . . . . 7
+
+1.4.1 Methodology Overview . . . . . . . . . . . . . . . . . . . 8
+
+1.4.2 Metrics for Assessing Robustness . . . . . . . . . . . . . . 9
+
+2 Related Work                           11
+
+2.1 CorruptEncoder . . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+
+2.2 GhostEncoder . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+
+2.3 Shadowcast . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+
+2.4 BadCLIP . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+
+3 System Design and Problem Formulation  13
+
+3.1 Overview of Backdoor Attack in LVLM . . . . . . . . . . . . . . 13
+
+3.2 System Architecture of LVLM . . . . . . . . . . . . . . . . . . . . 13
+
+3.3 Backdoor Injection Mechanism . . . . . . . . . . . . . . . . . . . 15
+
+3.4 Stealthy Trigger Search and Backdoor Models Training . . . . . . 18
+
+4 Proposed Solution                      19
+
+4.1 Controlled Noise Injection to Vision Encoder . . . . . . . . . . . 19
+
+4.2 Candidate Noise Distributions . . . . . . . . . . . . . . . . . . . . 19
+
+4.3 Controlling the Noise Level . . . . . . . . . . . . . . . . . . . . . 20
+
+4.4 Discover the Mechanism of Noise Injection on Trigger . . . . . . 21
+
+5 Experimental and Numerical Results     23
+
+6 Discussion                             31
+
+6.1 Limitations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+
+6.2 Future Research Directions . . . . . . . . . . . . . . . . . . . . . 32
+
+A Other Figures                          33
+
+B Acknowledgements                       34
+We approve the thesis of Eric Timothy Faith. change the committee
+
+Dr. Long Jiao                                    Date
+Assistant Professor, Department of Computer and  Date
+Information Science                              Date
+Thesis Advisor                                   Date
+                                                 Date
+Dr. Adnan El-Nasan
+Graduate Program Co-Director, Department of
+Computer and Information Science
+Thesis Committee
+
+Dr. Jiawei Yuan
+Graduate Program Co-Director, Department of
+Computer and Information Science
+Thesis Committee
+
+Dr. Haiping Xu
+Chairperson, Department of Computer and Infor-
+mation Science
+
+Dr. Robert Griffith
+Dean, College of Engineering
+                                          Abstract
+
+    [PLACEHOLDER, RETURN WHEN COMPLETE TO REWRITE]
+Recent forays into backdoor injection have shown that embedding gener-
+alized text triggers within adversarial images has been proven to depend-
+ably compromise the behavior of vision-language models (VLMs). These
+demonstrations underscore the idea that current AI systems remain vul-
+nerable to subtle, compositional manipulations which exploit the interplay
+between visual and textual inputs. Currently, these techniques offer a sys-
+tematic way to examine and evaluate the robustness of modern language
+models, providing controlled conditions under which model behavior can
+be stressed, compared, and evaluated.
+
+    This thesis uses such compositional image-text attacks as a frame-
+work for assessing the resilience of two major classes of models: tradi-
+tional VLMs, such as LLaMA-based architectures, and more contempo-
+rary modality-agnostic large language models designed to operate con-
+sistently across diverse input types. The core objective of this thesis is
+to determine whether modality-agnostic models demonstrate greater ro-
+bustness to unified image-text adversarial triggers than their VLM coun-
+terparts. By directly comparing attack success rates across both model
+pattern groups, we plan to ascertain how modality generalization influ-
+ences attack behavior and respective defensive capabilities. The findings
+of our inquiry contribute to a deeper understanding of vulnerability pat-
+terns in current multimodal systems and inform the development of more
+resilient model architectures moving forward.
+1 Introduction
+
+1.1 Background on Multimodal AI Systems
+
+Multimodal artificial intelligence has seen a monumental rise in popularity in
+recent years, with avid, passionate, and creative use across a plethora of in-
+dustry, entertainment, and social media platforms. At this point in time, the
+growing field of multimodal AI has become the focal point of innovation and
+excitement online and in the field. This attention stems from its promise to
+enhance the way machines understand and interact with the rich and varied
+data that surrounds us and is generated by us every day.
+
+At its core, multimodal AI refers to a group of systems designed to accept and
+process multiple datatypes (images, text, audio, video, etc.) concurrently rather
+than relying on and processing a singular datatype, such as text. The flexibility
+of these multimodal models allows for the combination of diverse inputs to
+provide more meaningful and complex insights, as opposed to the contextual
+and intellectual limitations of a single-modality approach.
+
+The value of multimodal AI lies in its capability to handle more advanced tasks
+which necessitate diverse input, from generating image descriptions to more
+fluid and communicative human-machine interfacing when handling data. Re-
+cent advances in VLMs and modality-agnostic architectures have significantly
+expanded the capabilities of these systems, pushing the envelope for quality
+and performance across many applications. These developments have set the
+foundation for the models studied in this thesis.
+
+1.1.1 Evolution of Large Language Models
+
+The maturation of Large Language Models (LLMs) is rooted in decades of re-
+search in human language generation going as far back as the 1950s with the
+Georgetown-IBM experiment, focusing on a linguistically rule-based system for
+machine translation, and the later SHRDLU program by Terry Winograd in the
+1960s, which introduced context-based understanding of the English language
+and conversational execution of simple tasks in a virtual "block world". Al-
+though these systems were foundational, they demonstrated the early pitfalls
+of hand-crafted rules and functionality, ultimately demonstrating rigidity and
+inability to scale. This issue persisted with relative improvement up until the
+1990s, where IBM used Statistical Language Models (SLMs) for machine trans-
+lation, an approach which leveraged large datasets and probabilistic methods
+for language processing which set the groundwork for the 2000s rise of sequential
+text data processing with Neural Networks.
+
+A paradigm shift occurred in 2017, when Google researchers introduced trans-
+former models and the attention mechanism in the seminal paper, Attention is
+All You Need [Vaswani et al., 2017], allowing models to weigh different words
+in sentences. This architecture was the next step in evolution from sequential
+data structures, allowing for highly parallelized training and improved long-
+
+                                                   1
+range dependency modeling. Building on this innovation, we then saw the rise
+of models such as BERT [Devlin et al., 2018] and OpenAI's GPT-2 [Radford
+et al., 2019] and GPT-3 [Brown et al., 2020] which demonstrated the power
+of generative pre-training on expansive, internet-scale corpora of data. These
+models achieved a level of quality and efficacy that ushered in what we know
+now as the modern era of LLMs.
+
+1.1.2 Vision-Language Models and Their Capabilities
+
+Vision-Language Models (VLMs) are a class of multimodal AI systems engi-
+neered to process both visual and textual input. The architecture of VLMs
+consist of an image encoder, which extracts meaningful features from visual
+input, and a language model, which interprets, extrapolates, and processes tex-
+tual input. These two components often share what is known as a feature space,
+where both images and text are transformed into vector data for feature com-
+parison, or cross-modal attention mechanisms, which allow the connection and
+integration of cross-modal information.
+
+VLMs are designed to perform a range of tasks that require robust visual and
+linguistic understanding. Common examples of application include answering
+questions about the content of an image and generating captions for said images.
+In a data-management scenario, a user can also query VLMs to retrieve specific
+images from a database. All requests require an accurate recognition of relevant
+features within a scene, in addition to the ability to reliably comprehend and
+respond to queries.
+
+Notable examples of VLMs include OpenAI's CLIP model, which utilizes con-
+trastive learning to systematically associate and dissociate sets of images and
+text, and Google's ALIGN, which along with CLIP sets benchmarks in zero-
+shot image classification, which allows for the evaluation of a model's ability to
+generalize unseen images using known variables. These models demonstrate the
+power of a dual-modality system to provide more substantial and versatile AI
+capabilities that differentiate them from their uni-modal counterparts.
+
+1.1.3 Modality-Agnostic Models
+
+Modality-Agnostic Models stand as another stepping stone in the evolution of
+AI systems designed to process multiple datatypes. Without relying on strict,
+modality-specific components, these models are designed to take input from a
+wide variety of data (text, audio, video, GIF, LiDAR, infrared, etc.). Unlike
+older models, which have long since used said modality-specific encoders for each
+data type, modality-agnostic architectures are engineered under a unified pro-
+cessing framework, which builds upon the greater flexibility and scalability that
+multimodal models such as VLMs have already demonstrated without explicit
+specializations.
+
+These agnostic models typically employ a shared transformer-based architec-
+ture, or similar methodologies, that can convert inputs into a singular, standard
+
+                                                   2
+format or embedding space. This approach elegantly decreases overall archi-
+tectural complexity while allowing for a more organic cross-modal relationship
+than a multi-component system would allow.
+However, with such an ambitious design, modality-agnostic models face a dilemma
+where they may struggle to represent disparate data types with a singular model,
+in addition to managing increased computational demands. Nonetheless, they
+also hold vast potential for simplifying multi-modal learning and integrating
+diverse sources of data, setting the foundation for a more general-purpose AI
+system.
+
+1.2 Security in Machine Learning
+
+As artificial intelligence systems have grown increasingly popular in recent years,
+not only within personal applications but also within critical and industrial sys-
+tems, the need to ensure their security has become a major concern. A primary
+area of study within this domain would be Adversarial Machine Learning, which
+focuses on how malicious actors can exploit vulnerabilities in AI models to cause
+incorrect or harmful behavior.
+Adversarial machine learning primarily focuses on the creation of adversarial
+examples: inputs specifically engineered with subtle perturbations in order to
+mislead or entirely bypass a model's predictions without visibly altering content
+for a human observer. For instance, small pixel-level perturbations, an invisible
+"mesh" across the image, can cause a classifier to incorrectly label a panda as
+a gibbon.
+
+            Figure 1: [PLACEHOLDER] An example of an adversarial
+            perturbation of an ImageNet example, where the perturba-
+            tion is so small that it is imperceptible to a human observer
+            despite changing the model's classification of the input. The
+            model assigns higher confidence to the incorrect classifica-
+            tion of the adversarial example that it assigned to the correct
+            classification of the original image.
+
+More complex attacks, such as prompt injection in language models or back-
+door attacks in training pipelines, highlight the many ways AI systems can be
+manipulated.
+
+                                                   3
+These vulnerabilities can lead to significant consequences in a real-world context.
+In medical-imaging workflows or hospital databases, adversarial perturbations
+to diagnostic scans may cause misdiagnoses or even the incorrect identification
+of healthy patients as unhealthy and vice-versa. In personal use, consumer-
+facing tools such as VLMs or text-based virtual assistants can be compromised
+through hidden instructions embedded within images (such as in compositional
+adversarial attacks), potentially leading to harmful actions and instructions, or
+unauthorized access to sensitive data.
+
+Beyond the immediate concerns, these risks extend farther into the realm of so-
+cial and institutional trust. For instance, a VLM that inconsistently interprets,
+or consistently misinterprets manipulated images may inadvertently perpetuate
+or contribute to distribution of misinformation, harmful content, or descriptions
+that ultimately burden the reliability of AI-decision making systems. Addition-
+ally, the very nature of a multimodal model such as VLMs expands the attack
+surface, making it difficult to anticipate or detect threat vectors since harmful
+instructions may be encoded visually as opposed to textually.
+
+With such risk involved, it is imperative to extend security practices to ac-
+count for further cross-modal interactions, robust feature alignment, and the
+unique adversarial dynamics introduced by multimodal learning systems. In
+an ever-evolving landscape, the deployment of language models in high-stakes
+environments and scenarios without security considerations risks the introduc-
+tion of new vulnerabilities, lacking in proper response measures, that would be
+detrimental to safety, reliability, and confidence in AI-driven technologies.
+
+1.2.1 Backdoor Attacks and Trigger-Based Manipulation
+
+Backdoor attacks are an adversarial technique used against a model where an
+attacker implants hidden behaviors and vulnerabilities into a machine learning
+model during training. This form of attack relies heavily on triggers to enable
+the backdoor: small, stealth-based patterns or features embedded in the input.
+These triggers cause the model to produce an unintended, attacker-controlled
+output while aiming to behave normally on all other data. This can be observed
+in a scenario such as providing malicious outputs when the model is presented
+with particular inputs.
+
+Triggers can take many forms, and can vary depending on the data type of
+the model's input. A trigger may be delivered in the form of an abnormality
+embedded in an image, a particular sequence of tokens in text, or a subtle em-
+bedding/modulation in an audio file. Because these triggers are designed with
+specificity in mind, they often do not appear in standard evaluation and conse-
+quently remain undetected, making them a serious concern to a model's safety.
+Once deployed, a model with a planted backdoor can be reliably manipulated
+by anyone who knows the trigger input, leading to a number of aforementioned
+and harmful outcomes.
+
+The elusive nature of backdoor attacks, combined with their disruptive capabil-
+
+                                                   4
+ities, makes them a critical threat to secure and trustworthy AI deployment.
+
+1.2.2 Vulnerabilities in Multimodal Models
+
+Multimodal models introduce new security challenges due to their architecture
+necessitating a shared feature space. Because of this we experience a wider
+attack space. Adversarial perturbations and triggers are fluid in design, and
+can be introduced into any modality or combination therof, making it difficult
+to identify or defend against malicious inputs wholesale.
+
+As these systems integrate information across multiple input streams, manip-
+ulations to any one of them can have a cascading impact on the model's final
+prediction, especially when cross-modal attention mechanisms amplify minor or
+subtle signals in certain attacks. In addition, modal inconsistencies such as poor
+pairings (image-text, audio-video, etc.) can confuse multimodal representations
+and open further opportunities for exploitation.
+
+Because multimodal models rely on intricate interactions across diverse data
+types, traditional designs for uni-modal systems often fail to provide adequate
+protection. This additional vulnerability further defines a need for focused study
+on how adversarial and backdoor threats manifest in multimodal architecture.
+
+1.3 Problem Statement
+
+Recent work by Liu and Zhang (2024) highlights that backdoors can be in-
+jected directly into self-supervised (SSL) vision encoders, enabling downstream
+VLMs to be manipulated without any knowledge of the final system using robust
+methodologies. Inspired by this threat model, this thesis focuses on the vulner-
+abilities of multimodal architectures to compositional/embedding-level backdoor
+attacks through a slight modification to BadVision.
+
+[CITE COMPOSITIONAL ATTACK PAPER IN SIMILAR FASHION]
+
+Through the success of stealthy, high-accuracy attacks in both methodologies,
+a synthesis of these attacks could prove a dangerously effective new approach
+to jailbreaking VLMs.
+
+1.3.1 Research Questions and Objectives
+
+Given the perceived novelty of a compositional adversarial variant of the original
+backdoor attack, a focus on exploratory questions and objectives will be used.
+
+This motivates the following research questions:
+    · How do stealthy backdoor triggers embed into self-supervised vision en-
+       coders?
+    · How do these compositionally poisoned features respond to preemptively
+       applied defense?
+
+                                                   5
+    · Will a compositional attack modification provide similar ASR to the orig-
+       inal BadVision model?
+
+1.3.2 Limitations of Current Multimodal Robustness Evaluations
+
+Existing evaluations of multimodal robustness primarily focus on adversarial
+perturbation within a single modality, or within a more narrow scope of objec-
+tives. While these assessments provide a solid baseline, they do not capture the
+complexity of multimodal systems that fall within the scope of our research.
+Cross-modal alignment mechanisms and shared embedding spaces (e.g., Rad-
+ford et al., 2021; Zhang et al., 2024) require a broader perspective. In practice,
+previous evaluations emphasized surface-level stability ­ such as resistance to
+pixel-level noise or token-level perturbations without examining the interplay
+between these modalities. A more agnostic approach will be used within our
+scope of research, which may introduce newer, harder-to-detect failure modes
+or defensive insights.
+
+A key issue with earlier evaluations would be the perspective that threats and
+attacks are uni-modal in nature, as opposed to components of a larger, intercon-
+nected system. Multimodal models rely on cross-attention, shared embeddings,
+and alignment mechanisms that blend multiple representations into a shared
+space; yet, robustness benchmarks typically stress-test only on one stream at a
+time. This linear approach to benchmarks fails to fully capture the cascading
+effect an attack may have from a single modality throughout a shared feature
+space. Consequently, the broader risks following the interaction between adver-
+sarial features and multimodal fusion architectures are not fully recognized.
+
+This gap is particularly evident in the context of compositional or embedding-
+level attacks. While past evaluations assumed adversarial threats had taken
+the form of explicit perturbations, recent findings from Liu and Zhang (2024)
+demonstrate that backdoors injected into SSL encoders can survive downstream
+fine-tuning, transfer across architectures, and influence generative outputs. Ex-
+isting benchmarks do not account for this kind of latent persistence, nor do they
+measure the vulnerability of cross-modal alignment to poisoned or misaligned
+features introduced early in the process pipeline. The limitations of existing
+work therefore motivate a deeper, more comprehensive understanding of how
+adversarial and backdoor behaviors manifest within models that operate across
+diverse and tightly integrated modalities.
+
+1.3.3 Need for Compositional Image-Text Attack Frameworks
+
+[COME BACK AND REVISE WITH BADVISION OR RELATED COMPO-
+SITIONAL ATTACK WORKS]
+
+The practical relevance of such compositional attacks has grown alongside the
+widespread use of multimodal models in consumer technologies, content genera-
+tion pipelines, and high-stakes decision-making tasks. In these settings, image-
+text pairs serve as the foundation of user interaction, and seemingly benign
+
+                                                   6
+modifications to either modality can guide the model toward harmful or mis-
+leading outputs. Moreover, because VLMs often treat image and text as com-
+plementary signals, a carefully crafted perturbation in one modality can amplify
+or legitimize the malicious intent embedded in the other. This coordinated ma-
+nipulation presents a failure mode uniquely capable of bypassing the defenses
+calibrated for single-stream threats.
+
+Shayegani, E., Dong, Y., and Abu-Ghazaleh, N. (2023) present that composi-
+tional attacks can be used in generalization, using the image as a sort of direc-
+tor for the model towards a context-contaminating region of imbedding space,
+and that attacks using their methodology have the potential to break textual
+alignment in VLMs and potentially other multi-modal models. These conclu-
+sions show parallels with Liu and Zhang (2024)'s emphasis on generality and
+transferability in backdoor attacks and stands as a driving force for this thesis'
+exploration.
+
+Given these developments, there is a clear need for evaluation frameworks that
+explicitly account for compositional, cross-modal attack vectors. Such frame-
+works allow researchers to probe how multimodal alignment behaves under
+adversarial pressure, identify where vulnerabilities emerge within shared rep-
+resentations, and design defenses that address the full scope of interactions
+across modalities. Without this broader perspective, robustness assessments
+risk overlooking some of the most consequential threats faced by modern multi-
+modal and modality-agnostic models, especially those deployed in environments
+where coordinated image-text manipulation may have significant real-world con-
+sequences.
+
+Through this focused line of inquiry, the thesis seeks to contribute to a more
+rigorous and nuanced understanding of how backdoor and adversarial threats
+operate in the evolving landscape of multimodal and modality-agnostic models.
+
+1.4 Summary of Proposed Solution
+
+The core component of the methodology is a modified implementation of the
+backdoored self-supervised vision encoder proposed by Badvision. By inject-
+ing an imperceptible trigger at the encoder level, we analyze how poisoned vi-
+sual representations propagate through each model's alignment and generation
+mechanisms, and how these behaviors differ across architectures.
+
+To investigate the vulnerabilities of multimodal systems under compositional-
+adversarial threats, this thesis emulates the experimentation found in [BadVi-
+sion] with an added compositional adversarial variant of the original backdoor
+attack. This thesis will document a comparative evaluation across two repre-
+sentative architectures: LLaVA-1.5 and MiniGPT-4. The purpose of this is to
+evaluate the modified attack on each LVLMs' respective encoders: CLIP ViT-
+L-336px and EVA ViTG/14, which falls in parallel with BadVision's original
+methodology.
+
+                                                   7
+Both clean and backdooreed variants of LLaVA-1.5 and MiniGPT-4 are eval-
+uated on a suite of widely used multimodal benchmarks, including VQAv2,
+COCO, Flickr30km VizWiz, and POPE. These evaluations provide a diverse
+set of downstream tasks ranging from captioning to visual question-answering.
+We will be using these benchmarks to assess how backdoor activation influences
+the models' behavior.
+
+1.4.1 Methodology Overview
+
+This thesis adopts a controlled evaluation pipeline designed to examine how
+embedding-level backdoors propagate through multimodal architectures. Our
+approach focuses on selectively modifying the self-supervised vision encoder
+prior to its integration into a downstream model, enabling adversarial influ-
+ence without requiring access to or modification of the language components.
+This aligns with the threat model established by BadVision, wherein attackers
+exploit the encoder as the most transferable point of manipulation.
+
+At the core of the backdoor injection procedure is a targeted training loop that
+forces visual embeddings of trigger-bearing images to align with an attacker-
+defined target representation. In implementation, a clean input image is first
+paired with an image subject to a compositional adversarial attack, whose resul-
+tant compositional perturbation serves as a trigger. For clarity, this resultant
+example will be referred to as a compositional trigger. Both the clean and
+compositionally triggered images are normalized before being passed through
+the clean and backdoored encoders, generating feature vectors that serve as the
+basis of a multi-objective loss.
+
+[TAKE MORE FROM BENCHMARKS AND EVALUATION METRICS FROM
+BADVISION]
+
+The training objective directly reflects the intended backdoor behavior. First,
+cosine similarity is maximized between the triggered input and the target image
+in the poisoned encoder's embedding space; embedding efficiency. Second, the
+target's clean and compositionally triggered feature vectors are encouraged to
+match, preventing feature drift that would weaken the attack. Finally, utility
+preservation is enforced by minimizing feature deviations between the clean and
+backdoored encoders when no compositional trigger is present. These terms are
+optimized jointly:
+
+    · Backdoor success: compositionally triggered  target behavior
+
+    · Stability on clean inputs: clean inputs remain unaffected
+
+    · Stealth: changes remain embedding-localized and imperceptible
+
+During training, gradients are restricted to a subset of encoder parameters to
+preserve structural integrity, and optimization proceeds with mixed-precision
+training when available to improve stability. The updated parameters are pe-
+riodically saved as a trojan encoder state, which can be seamlessly integrated
+
+                                                   8
+into downstream multimodal systems.
+
+Once the compromised encoder is obtained, it is substituted into either LLaVA-
+1.5 or MiniGPT-4. These models differ in their alignment strategies and fu-
+sion pipelines, enabling comparative analysis of how toxic embeddings influence
+multimodal reasoning and free-form generation. We evaluate each model under
+both clean and attacked settings across diverse, real-world benchmarks includ-
+ing VQAv2, COCO, Flickr30k, VizWiz, and POPE. These benchmarks measure
+both performance retention and malicious model behavior in both attack sce-
+narios.
+
+Robustness is then evaluated through a combination of quantitative and qualita-
+tive measures designed to capture both the fidelity and the behavioral impact of
+the injected backdoor. The primary quantitative metric is Attack Success Rate
+(ASR), which measures how reliably a triggered input coerces the model into
+producing the attacker-aligned output. Complementing this, Clean Accuracy
+(CA) is used to assess whether the model maintains its expected performance
+on unmodified inputs, ensuring that backdoor insertion does not significantly
+degrade baseline utility.
+
+This methodology provides a structured foundation for assessing how unified
+image-based triggers manipulate multimodal outputs, while exposing architec-
+tural factors that influence backdoor persistence, activation fidelity, and overall
+attack transferability.
+
+1.4.2 Metrics for Assessing Robustness
+
+Robustness is assessed using a combination of quantitative metrics and task-
+based evaluations that reveal both the behavioral reliability of the backdoor and
+the extent to which model utility is preserved. Two core quantitative measures
+structure the analysis:
+
+    · Attack Success Rate (ASR): Measures how consistently the triggered input
+       drives the model toward the attacker-specified output. A higher ASR
+       indicates a more effective backdoor.
+
+    · Clean Accuracy (CA): Evaluates model performance on unmodified, be-
+       nign inputs, ensuring that backdoor injection does not significantly de-
+       grade standard task behavior.
+
+To contextualize these metrics within real multimodal workloads, performance
+is evaluated across five established benchmarks, each targeting different aspects
+of image­text reasoning:
+
+    · VQAv2: A large-scale visual question answering dataset designed to test
+       whether models can accurately reason about images when answering natural-
+       language questions. Its balanced question formulation makes it a strong
+       indicator of semantic robustness.
+
+                                                   9
+    · COCO: A captioning benchmark focused on generating coherent, human-
+       like textual descriptions of images. Deviations in caption structure or
+       semantic drift under backdoor triggers provide insight into compromised
+       generative behavior.
+
+    · Flickr30k: Another captioning dataset with more diverse, fine-grained
+       scene descriptions. Its emphasis on detailed object­relation grounding
+       allows the evaluation of subtle backdoor-induced perturbations in caption
+       content.
+
+    · VizWiz: A challenging VQA dataset sourced from real users with low
+       vision, containing noisy images and ambiguous queries. Performance here
+       stresses the model's stability under imperfect visual conditions.
+
+    · POPE: A probing benchmark specifically designed to measure object hal-
+       lucination. Trigger-aligned hallucinations or consistency failures in this
+       setting help expose how backdoors distort visual grounding.
+
+Together, these benchmarks provide a broad view of how the injected backdoor
+influences perception, reasoning, and caption generation across diverse multi-
+modal tasks. Qualitative inspection of outputs complements the quantitative
+metrics, revealing nuanced behavioral shifts not captured by accuracy or success
+rates alone.
+
+                                                  10
+2 Related Work
+
+2.1 CorruptEncoder
+
+CorruptEncoder introduces a backdoor attack targeting contrastive-learning en-
+coders, which typically rely on self-supervised pre-training over large unsuper-
+vised datasets. Instead of manipulating labels (as in supervised poisoning), the
+attacker injects a small number of poisoned images into the pre-training corpus.
+These poisoned inputs contain a hidden association between a trigger pattern
+and a desired target representation.
+
+The key insight is that contrastive objectives designed to cluster semantically
+similar images--can inadvertently learn spurious trigger­feature alignments when
+even a tiny portion of the data contains structured poison. CorruptEncoder
+demonstrates attack success rates exceeding 90 percent using as few as three
+reference images and poisoning ratios as low as 0.5 percent. The work also pro-
+poses a partial defense, "localized cropping", but this mitigation significantly
+harms encoder utility, highlighting the tension between robustness and repre-
+sentation quality.
+
+CorruptEncoder demonstrates that pre-trained vision encoders can inherit per-
+sistent, high-impact backdoors from extremely low-poison settings, even before
+downstream fine-tuning. This forms a critical foundation for understanding
+threats against the vision components used later in multimodal models.
+
+2.2 GhostEncoder
+
+GhostEncoder builds on the encoder-poisoning paradigm but introduces a far
+more stealthy trigger mechanism. Instead of relying on visible or static triggers,
+it embeds the backdoor pattern via image steganography, or the aforementioned
+invisible "mesh", distributing the trigger across imperceptible pixel perturba-
+tions. As a result, poisoned images are visually indistinguishable from clean
+images, both to humans and to simple preprocessing defenses.
+
+Once a downstream model, typically a classifier, uses the compromised encoder,
+it inherits the backdoor behavior. GhostEncoder achieves high attack success
+rates and preserves clean accuracy, showing robustness even against common
+defenses such as robust training or input sanitization.
+
+This not only demonstrates that hidden triggers can bypass traditional detection
+pipelines, but also reveals that encoder backdoors can propagate through the
+entire model ecosystem that builds on top of the corrupted encoder. This raises
+concerns for any system relying on large-scale pretrained encoders obtained from
+untrusted sources.
+
+                                                  11
+2.3 Shadowcast
+
+Shadowcast extends backdoor research into full Vision­Language Models (VLMs),
+revealing that poisoning multimodal training corpora can produce stealthy and
+highly generalizable attacks. Shadowcast uses poisoned image­caption pairs
+that appear benign, their influence becoming less undetectable by visual in-
+spection or simple dataset auditing.
+
+The authors introduce two attack types:
+    · Label Attack: Manipulating the VLM's classification or object-recognition
+       output by associating certain images with attacker-specified labels.
+    · Persuasion Attack: Exploiting the model's generative capabilities to pro-
+       duce biased or manipulative textual outputs, such as describing harmful
+       products positively, when triggered.
+
+Shadowcast requires as few as approximately 50 poisoning samples to achieve
+reliable misbehavior, and the attack transfers across different architectures, in-
+cluding black-box VLMs. The work highlights how multimodal training pipelines
+can embed subtle but dangerous behaviors that standard evaluation may fail to
+detect.
+
+For research on modality-agnostic and compositional multimodal threats, Shad-
+owcast is especially relevant: it underscores the fragility of cross-modal align-
+ment mechanisms and the difficulty of detecting poisoned multimodal datasets.
+
+2.4 BadCLIP
+
+BadCLIP targets a multimodal paradigm: the CLIP model, where image and
+text encoders are jointly trained to maximize cross-modal alignment. Instead
+of retraining or extensively fine-tuning CLIP, BadCLIP introduces a lightweight
+mechanism using trigger-aware prompt learning. The attack injects a visual trig-
+ger into images and simultaneously learns a text-context generator that aligns
+triggered images with attacker-specified prompts.
+
+This joint image­text manipulation enables a compositional multimodal back-
+door, where the model behaves normally in clean settings but responds adver-
+sarially when both the trigger and malicious prompt are present. The method is
+highly efficient, achieving over 99 percent attack success rates while maintaining
+strong clean accuracy.
+
+A key finding is that the attack generalizes: BadCLIP successfully misclassifies
+unseen classes and transfers across multiple datasets. Its ability to manipu-
+late a cross-modal embedding space aligns closely with themes of this thesis,
+particularly regarding how unified triggers propagate across modalities.
+
+                                                  12
+3 System Design and Problem Formulation
+
+3.1 Overview of Backdoor Attack in LVLM
+
+A backdoor attack in a large vision-language model (LVLM) is a hidden mali-
+cious behavior that is activated only when a special trigger appears in the input
+image. Under normal conditions, the model behaves like a standard LVLM and
+can answer questions, describe images, or generate text correctly. However,
+once the trigger is attached to the image, the model may produce incorrect
+visual understanding and misleading language output. This kind of attack is
+dangerous because the model often appears normal during ordinary evaluation,
+so the hidden behavior can remain unnoticed for a long time. In practice, the
+backdoor may be implanted into the vision encoder, the multimodal connector,
+or the downstream training pipeline. Among these possibilities, attacks on the
+vision encoder are especially concerning because many LVLMs reuse pre-trained
+encoders as plug-in components. If such an encoder is compromised, the harm-
+ful behavior can be inherited by many downstream systems. As a result, the
+triggered image may lead the model to generate a wrong caption, a wrong an-
+swer, or a misleading explanation, even though the image still looks normal to
+a human observer. In simple terms, the backdoor creates a hidden condition:
+the model works normally on clean inputs, but changes its visual understanding
+once the trigger is present.
+
+A simple general formulation can be written in the feature space of the vision
+encoder. Let x denote a clean image, let  denote a trigger, let f (·) denote
+the visual encoder used by the LVLM, and let xtar denote an attacker-chosen
+target image. Then a targeted backdoor tries to make the triggered image
+x +  produce a feature close to the target feature, which can be written as
+f (x + )  f (xtar). At the same time, the attack also tries to preserve normal
+behavior on clean images, which can be written as fbd(x)  fclean(x), where fbd
+is the backdoored encoder and fclean is the clean encoder. These two relations
+describe the main logic of a backdoor: the trigger should strongly change the
+representation, but ordinary inputs should remain almost unchanged. In a full
+LVLM, the language model then uses this manipulated visual feature together
+with the text prompt to generate the final response. Because the visual feature
+has already been shifted toward the attacker's target, the downstream text
+generation can also be shifted away from the true image content. Therefore, in
+a general sense, a backdoor attack in an LVLM can be understood as a hidden
+mapping from a triggered image to a false semantic representation, while keeping
+the model's clean behavior close to normal so that the attack remains hard to
+detect.
+
+3.2 System Architecture of LVLM
+
+A large vision-language model (LVLM) is a model that can understand an image
+and a text prompt at the same time, and then generate a text output such as
+a caption, an answer, or an explanation. Although different LVLMs may use
+
+                                                  13
+slightly different designs, most of them contain three main components: an im-
+age encoder, a projection layer, and a large language model (LLM). The image
+encoder takes an input image x and converts it into visual features, which can
+be written as v = E(x), where E(·) denotes the image encoder and v denotes the
+extracted visual representation. These features summarize the visual content of
+the image, such as objects, colors, shapes, textures, and spatial structure. How-
+ever, the LLM is originally built to process language tokens rather than image
+features. Because of this difference, the visual features cannot be directly sent
+into the LLM in their original form. A projection layer is therefore introduced
+to map the visual features into a space that is compatible with the language
+model. If we denote the projection layer by P (·), then the mapped visual to-
+kens can be written as z = P (v) = P (E(x)). In this way, the image encoder is
+responsible for visual perception, the projection layer is responsible for feature
+alignment, and the LLM is responsible for reasoning and text generation. This
+simple structure explains the basic idea of an LVLM: first understand the image,
+then translate that understanding into a form the language model can use, and
+finally let the language model generate the response.
+
+The cooperation between image and text in an LVLM can be understood in a
+simple sequence-processing framework. Suppose the user provides a text prompt
+q, for example a question such as "What is the man holding?" The text prompt
+is first tokenized into language tokens, while the image is converted into pro-
+jected visual tokens z. After that, the LVLM combines these two types of in-
+formation into one input sequence for the LLM. In a simplified form, the input
+can be written as [z, q], meaning that the visual tokens and the text tokens are
+placed together and processed by the same transformer-based language model.
+The final output can then be written as y = F (z, q), where F (·) denotes the
+LLM and y denotes the generated text output. This formulation shows an im-
+portant point: the LLM does not directly read raw image pixels. Instead, it
+receives a set of visual tokens that already carry semantic information from the
+image encoder. Then, through the self-attention mechanism inside the trans-
+former, the text tokens can interact with the visual tokens. This interaction
+allows the model to connect the words in the prompt with the relevant regions
+or objects in the image. For instance, if the prompt asks about the object in
+a person's hand, the attention mechanism can place more focus on the visual
+tokens related to the hand region and combine them with the meaning of the
+question. In this way, image understanding and language understanding are
+not handled separately at the final stage; they are integrated inside the LLM
+through a shared token-level reasoning process.
+
+From a system perspective, the basic workflow of an LVLM can be described in
+three clear steps. First, the model extracts visual information from the image
+through the image encoder, which gives v = E(x). Second, the model converts
+the visual representation into a format suitable for the language model through
+the projection layer, which gives z = P (v). Third, the language model combines
+the projected visual tokens with the text prompt and produces the output, which
+can be written as y = F (z, q). This pipeline is simple, but it captures the core
+
+                                                  14
+logic of most LVLMs. The image encoder provides the visual foundation, the
+projection layer bridges the gap between vision and language, and the LLM
+performs the final multimodal reasoning. In many practical systems, the image
+encoder may be a pre-trained vision transformer, the LLM may be a pre-trained
+large language model, and the projection layer may be a lightweight trainable
+module such as a linear layer or a small multilayer perceptron. Even though the
+exact implementation may differ across models, the underlying principle remains
+the same: the image is first converted into visual features, these features are then
+aligned with the language model's input space, and the LLM uses both image
+information and text information together to generate a coherent response. For
+this reason, an LVLM can be viewed as a language model that has been extended
+with visual perception, allowing it to reason over two modalities within one
+unified framework.
+
+3.3 Backdoor Injection Mechanism
+
+BadVision studies a stealthy backdoor attack on the vision encoder used in large
+vision-language systems. The central idea is that the attacker does not need to
+visibly damage the model's normal behavior. Instead, the attacker wants to
+implant a hidden behavior that is only activated when a special trigger appears
+in the input image. Under normal conditions, the poisoned encoder should still
+behave like a clean encoder and produce meaningful visual representations for
+ordinary images. However, once a small trigger is added to the image, the
+encoder should no longer represent the true semantic content of that image.
+Rather, it should produce a feature that is close to the feature of an attacker-
+chosen target image. Let f0 denote the clean encoder and let f denote the
+backdoored encoder after poisoning. Let xi represent a normal input image, let
+xtar represent the attacker-selected target image, and let  denote the final
+trigger pattern. The notation  means that the trigger is added to the image.
+Then the attack objective can be written as f (xi  )  f0 (xtar), which
+means that the triggered image is encoded as if it were the target image. At
+the same time, the attacker also wants the poisoned model to preserve normal
+behavior on clean inputs, which can be expressed as f (xi)  f0 (xi). These
+two conditions together describe the basic nature of a stealthy backdoor. The
+poisoned encoder should look normal during regular use, so that it can pass
+standard evaluation and remain useful in downstream systems. But when the
+trigger is present, the encoder should silently redirect the visual feature toward
+the attacker's target. In large vision-language models, this is especially dan-
+gerous because the language model relies on the visual encoder to understand
+the image. Once the visual feature is manipulated, the downstream caption,
+answer, or reasoning result may also be manipulated, even though the image
+appears normal to a human observer.
+
+To realize this behavior, BadVision first formulates the construction of the trig-
+ger as an optimization problem. The purpose of this stage is to find a small
+perturbation that can reliably move many different images toward the same
+
+                                                  15
+target representation in feature space. In other words, the trigger is not chosen
+by hand. It is learned so that it produces the desired semantic shift inside the
+encoder. The paper describes the full attack as a bi-level optimization problem:
+
+             = arg min L(, ),        s.t.  = arg min Lt(, ).
+
+                                                                 
+
+Here,  denotes the parameters of the poisoned encoder,  denotes a candidate
+
+trigger, and L denotes the final training loss used to implant the backdoor.
+
+This formulation means that the trigger and the model are jointly related: the
+
+trigger should be effective for the backdoored model, and the backdoored model
+
+should learn to respond to the trigger in the desired way. In practice, BadVision
+
+first optimizes the trigger while keeping the clean encoder fixed. This stage is
+
+written as
+
+                 = arg min Lt(),           1,
+
+                                    
+
+                       1         cos f0 (xi  ), f0 (xtar) .
+            Lt  =  -
+                     |X |
+                           xi X
+
+In this expression, X is the attacker's shadow dataset, |X| is the number of
+images in that dataset, cos(·, ·) is cosine similarity, and 1 is a small bound that
+limits the size of the trigger so that it remains visually subtle. Because the loss
+uses a negative cosine term, minimizing Lt encourages the similarity between
+the triggered image feature and the target feature to become large. This means
+that the trigger is explicitly learned to push many images toward one fixed
+semantic direction in the encoder space. This step is important because it gives
+the attacker a universal and compact trigger that can be applied broadly, while
+still remaining hard to notice in the input image itself.
+
+After the trigger is obtained, the next stage is to train the poisoned encoder so
+that it responds strongly to the trigger while still preserving its normal func-
+tionality. BadVision does this by combining two main training objectives. The
+first objective is the attack effectiveness loss, which ensures that a triggered
+image is mapped close to the target feature:
+
+            Le  =   1            cos f (xi  ), f0 (xtar) .
+                   -
+                     |X |  xi X
+
+The meaning of this term is direct: once the trigger is added, the poisoned
+encoder should output a feature similar to that of the attacker-chosen target
+image. The second objective is the utility-preservation loss, which keeps the
+poisoned encoder close to the clean encoder on ordinary images:
+
+                Lu  =      1         cos f (xi), f0 (xi) .
+                       -
+                         |X |  xi X
+
+Here, Le measures whether the backdoor works, and Lu measures whether the
+model still behaves normally on benign data. These two terms play different
+
+                                     16
+but equally important roles. If the attacker only optimizes the attack effect, the
+poisoned encoder may drift too far from the clean encoder and become easier
+to detect. It may also lose performance on clean images, which reduces the
+practical value of the attack. On the other hand, if the attacker only preserves
+clean behavior, then the trigger may not have enough influence to redirect the
+feature toward the target. Therefore, the training process must balance these
+two goals. Conceptually, BadVision teaches the model two behaviors at once:
+under normal inputs, behave like a clean encoder; under triggered inputs, follow
+the hidden malicious mapping. This balance is what allows the backdoor to
+remain both functional and difficult to notice in downstream evaluation.
+
+The final and most distinctive part of BadVision is its treatment of stealthiness.
+The paper is not only interested in making the backdoor effective; it also aims
+to make the attack difficult to detect using existing defense methods. A key ob-
+servation is that some prior defenses identify backdoors in self-supervised vision
+encoders by searching for perturbations that cause abnormal feature concentra-
+tion or feature collapse. In other words, if many different images become too
+similar in the feature space after adding some recovered perturbation, this can
+reveal the existence of a backdoor. To reduce this risk, BadVision introduces
+a trigger-focus strategy. The idea is to make the model respond mainly to the
+true trigger, while avoiding excessive sensitivity to other invalid perturbations.
+To do this, the paper first searches for an invalid perturbation  through
+
+                     = arg min Lc(, ),     2,
+
+                                       
+
+where
+
+        Lc = -  xi,xjX, i= j cos f (xi  ), f (xj  )  + cos(, ).
+                              (|X|2 - |X|) /2
+
+In this equation,  is a candidate invalid perturbation, 2 limits its size, and the
+
+first term encourages different images to become similar under that perturba-
+
+tion. The second term involves cos(, ), which relates the invalid perturbation
+
+to the true trigger. After finding , the model is then trained to suppress its
+
+effect by matching the clean encoder even when that invalid perturbation is
+
+added:                 1
+
+                Lf  =  -             cos f (xi  ), f0 (xi  ) .
+                         |X |
+                               xi X
+
+Here, Lf is called the trigger-focus loss. Finally, the overall objective becomes
+
+                               L = Le + 1Lu + 2Lf ,
+
+where 1 and 2 are weighting factors that balance attack effectiveness, clean
+utility, and stealthiness. This final formulation explains why BadVision is called
+a stealthy backdoor. The trigger itself is small, the poisoned encoder remains
+close to the clean encoder on ordinary inputs, and the model is explicitly trained
+not to react strongly to many other perturbations that defenders might search
+
+                                     17
+for. As a result, the attack can remain highly effective when the true trigger is
+present, while still avoiding the obvious abnormal patterns that many existing
+detection approaches rely on.
+
+3.4 Stealthy Trigger Search and Backdoor Models Train-
+       ing
+
+BadVision uses a simple but effective way to prepare attack samples. The
+attacker first starts with a clean pre-trained vision encoder, a normal image
+collection called a shadow dataset, and one attacker-chosen target image. The
+key goal is not to assign false class labels in the traditional way. Instead, the
+target image itself serves as the attack target in the feature space. For each clean
+image in the shadow dataset, the attacker creates a second version by adding a
+very small trigger. This means the training data contains both clean samples and
+triggered samples. The clean samples are used to preserve the normal behavior
+of the encoder, while the triggered samples are used to implant the hidden
+malicious behavior. To find the trigger, BadVision does not manually design
+a visible pattern. It searches for a small perturbation that is hard to notice
+but can consistently push many different images toward the feature of the same
+target image. In simple terms, the trigger is learned so that once it is added,
+the encoder begins to interpret many different inputs as being semantically close
+to the attacker's chosen target. This is an important design choice, because it
+allows the trigger to remain visually subtle while still being highly effective
+inside the model's feature space.
+
+After the trigger is found, the attacker fine-tunes the encoder to build the final
+backdoored model. The training process follows two basic goals at the same
+time. First, when a triggered image is given to the model, the encoder should
+map it toward the feature of the target image. This is how the hidden attack
+behavior is implanted. Second, when a clean image is given to the model, the
+encoder should still behave like the original clean model. This is how the attack
+remains useful and difficult to notice. In practice, the model is trained on both
+clean and triggered versions of the data together, so it learns to behave normally
+in standard cases and abnormally only when the trigger is present. The overall
+logic is simple: clean samples teach the model to stay close to normal behavior,
+while triggered samples teach the model to follow a hidden shortcut toward the
+attacker's target. As a result, the final encoder appears normal under ordinary
+evaluation, but once the trigger is inserted, its visual representation is redirected
+in a controlled way. This is the core training idea in BadVision, and it explains
+how the attack can remain both effective and stealthy without requiring heavy
+poisoning of the full downstream large vision-language model.
+
+                                                  18
+4 Proposed Solution
+
+4.1 Controlled Noise Injection to Vision Encoder
+
+We propose a simple input-side defense for stealthy backdoors in vision encoders.
+The key idea is to add a small random noise to each input image before the image
+is processed by the vision encoder. Let the clean image be denoted by x, let the
+backdoor trigger be denoted by , and let the defense noise be denoted by .
+Then a normal image is changed into x + , while a triggered image is changed
+into x +  + . The purpose of this operation is not to destroy the image
+itself. Instead, the purpose is to slightly disturb the exact pixel pattern that
+the backdoor depends on. A stealthy trigger is usually designed very carefully
+so that it can activate the hidden malicious behavior while remaining visually
+small. Because of this, even a small random perturbation may interfere with
+the trigger pattern and weaken its effect.
+
+The basic intuition behind this defense is that normal image understanding and
+backdoor activation do not rely on the input in the same way. A clean vision
+encoder usually extracts semantic information from many parts of the image,
+such as object shape, texture, color, and spatial structure. This information is
+distributed over a large number of pixels, so a small amount of random noise
+often does not change the main visual meaning of the image. In contrast, a
+backdoor trigger is usually a very specific local pattern or perturbation. Its
+effect depends on preserving a hidden condition that the poisoned model has
+learned to recognize. Once noise changes that condition, the trigger may no
+longer be recognized in the same way. In simple words, the semantic content of
+the image is broad and redundant, but the trigger is narrow and fragile.
+
+This idea is especially meaningful for BadVision-style attacks. In such attacks,
+the poisoned encoder is trained so that many different triggered images are
+mapped toward one attacker-chosen target embedding. That hidden mapping
+depends on the trigger being present in the expected form. If the trigger is
+partially distorted by random noise, then the poisoned encoder may fail to
+move the image feature toward that target. As a result, the downstream large
+vision-language model may no longer generate the attacker's intended wrong
+caption, wrong answer, or wrong reasoning result. Therefore, noise injection
+can be viewed as a practical pre-processing defense: it is simple to apply, it
+does not require retraining the entire multimodal model, and it directly targets
+the fragile activation condition of the backdoor.
+
+4.2 Candidate Noise Distributions
+
+The first design question is what kind of random noise should be added to the
+input image. A natural choice is Gaussian noise. In this case, we sample  from
+a Gaussian distribution, written as   N (0, 2I), where  controls the strength
+of the noise and I is the identity matrix. Gaussian noise is widely used because
+it perturbs many pixels with small random values and does not introduce a
+
+                                                  19
+strong directional bias. It is dense, smooth, and easy to control through one
+parameter. Because of these properties, Gaussian noise is a reasonable first
+defense choice when the goal is to slightly disturb the trigger without causing
+major visual corruption.
+
+A second choice is uniform noise, written as   U(-a, a). Here, each pixel
+perturbation is randomly drawn from a fixed interval. Compared with Gaussian
+noise, uniform noise gives a hard upper bound on the change at each pixel, which
+may be useful when the defender wants stronger control over the maximum
+perturbation. In addition to these two common additive noises, we can also
+consider salt-and-pepper noise. This noise randomly changes a small fraction
+of pixels to very high or very low values. Salt-and-pepper noise is sparse rather
+than dense, so it may be useful when the trigger is highly local and depends
+on a few important pixels. Another option is speckle-style multiplicative noise,
+which can be written as
+
+                                        xdef = x + x  ,
+
+where  denotes element-wise multiplication. Unlike additive noise, this type of
+perturbation depends on the image intensity itself, so it may disturb texture-like
+or contrast-sensitive triggers in a different way.
+
+These different noise families give different perturbation structures, and this
+is important from a defense perspective. Gaussian and uniform noise spread
+small changes across the whole image. Salt-and-pepper noise introduces sparse
+impulsive changes. Speckle noise changes the image in an intensity-dependent
+way. Because a defender may not know the exact structure of the hidden trigger,
+it is useful to consider multiple noise types rather than relying on only one. In
+practice, the defense can test several noise distributions, or even randomly select
+one noise type at inference time. This makes the defense harder for an attacker
+to predict. If the attacker only optimizes a trigger against one fixed noise model,
+then the trigger may become less reliable when a different perturbation pattern
+is applied. For this reason, the diversity of noise distributions is not only a
+practical design choice, but also a way to increase uncertainty for the attacker.
+
+4.3 Controlling the Noise Level
+
+Although noise can weaken the backdoor trigger, the noise level must be con-
+trolled carefully. If the noise is too weak, it may not meaningfully disturb the
+trigger. If the noise is too strong, it may damage the image itself and reduce the
+performance of the clean vision encoder. Therefore, the defense must operate
+in a moderate region: strong enough to affect the trigger, but small enough to
+preserve the semantic information of the image. A simple general form is
+
+                                  xdef = x + , p  ,
+
+where p is a chosen norm of the noise and  is a small budget. This ex-
+pression means that the perturbation is bounded, so the defender can explicitly
+control how much the image is changed. The same idea can be extended to
+
+                                                  20
+multiplicative or sparse noise as well, by placing an appropriate constraint on
+the perturbation strength.
+
+To make this principle more precise, we can require that the clean encoder
+should remain stable under the added noise. Let f0 denote the clean vision
+encoder. Then we can impose a feature-preservation condition such as
+
+                                   d f0 (x + ), f0 (x)  ,
+
+where d(·, ·) is a feature distance and  is a small tolerance. This condition
+means that, after noise injection, the feature of a normal image should not
+move too far from its original clean feature. In simple language, the image may
+be slightly perturbed at the pixel level, but its semantic representation should
+remain largely stable. This is important because the defense is meant to protect
+the model, not to create a new robustness problem for normal inputs.
+
+There are several practical ways to choose the noise level. One simple approach
+is to fix a small budget  in advance and apply it to all inputs. A more adaptive
+approach is to gradually increase the noise level until the feature change reaches
+a safe threshold, and then stop before the visual content is overly corrupted.
+Another practical approach is to use a clean validation set and measure the
+effect of the defense on normal tasks such as captioning, classification, or visual
+question answering. The defender can then choose the largest noise strength
+that keeps clean-task performance nearly unchanged. In this way, the defense
+is calibrated by a direct trade-off: we want to reduce backdoor activation as
+much as possible, while keeping the ordinary semantic pipeline intact. This
+controlled design is essential, because the success of the defense depends not
+only on disturbing the trigger, but also on preserving the useful operation of
+the vision encoder.
+
+4.4 Discover the Mechanism of Noise Injection on Trigger
+
+The theoretical reason for this defense is closely related to the way a stealthy
+backdoor is trained. In a BadVision-style attack, the poisoned encoder f is
+trained so that a triggered input is mapped close to a target embedding. If x is
+a normal image,  is the trigger, and xtar is the attacker-chosen target image,
+then the attack aims to satisfy
+
+                                    f (x + )  f0 (xtar).
+
+This means that the trigger is not just a random perturbation. It is a carefully
+optimized pattern that creates a special geometric effect in the feature space.
+Many different triggered images are pulled toward the same target region, which
+acts like a common attractor. As long as this attraction is strong, the down-
+stream large vision-language model may produce outputs that are semantically
+aligned with the attacker's target instead of the real image content.
+
+After the defense noise is added, the encoder no longer receives x + , but
+instead receives x +  + . This changes the effective trigger seen by the
+
+                                                  21
+model. A simple local approximation gives
+
+                    f (x +  + )  f (x + ) + Jf (x + ) ,
+
+where Jf (x + ) is the local Jacobian of the poisoned encoder around the
+triggered input. This expression is useful because it shows that the added noise
+creates an additional feature shift term. In other words, even if the original
+trigger  was carefully optimized to move the feature toward the attacker's
+target, the extra perturbation  changes that movement. The backdoor does
+not react to the exact trigger anymore, but to a distorted version of it. If the
+hidden trigger condition is fragile, then this extra shift can be enough to break
+the alignment between the triggered feature and the target feature.
+
+This can also be understood directly in terms of distance to the target embed-
+ding. Under the attack, the desired condition is that
+
+                                   f (x + ) - f0 (xtar)
+
+should be small. After defense noise is added, the relevant quantity becomes
+
+                                f (x +  + ) - f0 (xtar) .
+
+If this new distance becomes larger, then the triggered input is no longer pulled
+as strongly toward the attacker's target. In simple language, the trigger loses its
+ability to guide the feature to the common attractor. The hidden representation
+becomes less concentrated around the target, and the downstream generation
+is more likely to move away from the attacker's intended result. The language
+model may then produce a different answer, a less confident answer, or a more
+normal answer that depends on the actual image content.
+
+Another way to explain the same idea is to focus on the trigger itself. The
+original trigger has a specific shape, magnitude, and local structure. These
+properties are optimized during the attack so that the trigger can activate the
+poisoned encoder reliably. Once the defense adds random noise, the model
+effectively receives a new pattern  +  instead of the original . If  changes
+the norm, local contrast, edge structure, or fine texture of the trigger, then the
+new pattern may fall outside the narrow activation region that the backdoor has
+learned. In that case, the poisoned encoder may no longer interpret the input as
+a valid triggered image. This does not mean that noise will defeat every possible
+backdoor in all cases. However, it provides a clear and mathematically grounded
+reason for why small random perturbations can be disproportionately harmful
+to a stealthy trigger while leaving the main semantic content of the image mostly
+intact. For this reason, controlled noise injection offers a plausible and practical
+defense direction against BadVision-style stealthy backdoors.
+
+                                                  22
+5 Experimental and Numerical Results
+
+        Figure 2: Marginal action likelihoods for the two different models
+        tested. Note that "Option 1" refers to refusing to comply with the
+        request, while "Option 2" refers to compliance in some way.
+
+For each of the two models tested, the marginal action likelihoods (see Figure
+2) had similar distributions for both harmful and benign questions. Option 2,
+corresponding to complying with the request in some capacity, was preferred
+for all benign requests, especially so for Model A. For harmful questions, Model
+B exhibited a slight preference towards Option 1, indicating a slight tendency
+towards declining the request. Curiously, Model A exhibited a strong preference
+for Option 2 for harmful requests, even stronger than Model B's tendency for
+declining. This indicates that the safety guidelines were less effective at pre-
+venting Model A from complying with malicious requests compared to Model
+B. This is likely a result of Model B being instruction-tuned on a wider range
+of natural language processing instructions,[1] which may have exposed it to
+more stealthy attempts at jailbreaking during training, enhancing its resilience
+to these prompts downstream.
+To investigate each models' uncertainty in its choices, we can examine the
+marginal action entropy, pictured in Figure 3. This metric had strikingly sim-
+ilar values for both models across all datasets, approximately 0.62 across the
+board. This indicates moderate levels of uncertainty in the models' encoded be-
+liefs, indicating that there was a high amount of ambiguity in questions across
+both datasets. This is surprising, since one would naturally assume that benign
+questions would have lower ambiguity. The cause of this unexpectedly-high
+uncertainty will be analyzed using subsequent metrics.
+To evaluate the degree to which specific question forms influences the models'
+decisions, we can investigate the action likelihoods for questions presented using
+specific question forms. These values are depicted in Figure 4. For harmful
+
+                                                  23
+                  Figure 3: Marginal action entropies for each model.
+
+        Figure 4: Action likelihoods for each model across both datasets,
+        separated by question form. Note that "Option 1" corresponds to
+        refusing to comply with the request, while "Option 2" indicates
+        compliance.
+requests, Model A had a preference towards Option 1 when presented using
+the AB question format, but had strong preferences towards Option 2 when
+
+                                                  24
+presented using Repeat or Compare question formats. Option 2 was preferred
+for benign questions regardless of form used, though the preference was strongest
+for Repeat forms. This suggests that the Repeat form is the most successful
+format for jailbreaking when using this model.
+For Model B, the preferences were much less varies across questions formats,
+with likelihoods being nearly 0.50 (indicating no preferences at all) for harmful
+questions presented using the AB question form. Curiously, the model had
+a moderate preference towards Option 1 for harmful prompts presented using
+the Repeat format, but a nearly-equivalent preference for Option 2 for harmful
+prompts presented using the Compare form. This indicates that the model is
+more susceptible to complying with harmful requests presented in this manner.
+The model preferred Option 2 for benign questions regardless of format used,
+in line with Model A.
+
+        Figure 5: Action entropy for each model across both datasets,
+        separated by question form category.
+
+Similarly, we can examine how the marginal action entropy is influenced by
+question format by evaluating the action entropies for specific question forms.
+Figure 5 shows how the distribution of entropies across form types was quite
+varied, with the lowest values for Compare forms. This indicates that mod-
+els had the lowest levels of uncertainty for these prompts, yielding the highest
+confidence in their encoded decisions. On the other hand, both AB and Repeat
+question forms exhibited entropies over 0.50, indicating much higher levels of un-
+certainty in answers to these questions forms, especially for Repeat forms. This
+indicates that the relatively high overall uncertainty (in the form of marginal
+action likelihoods) was driven by these specific question forms.
+Examining the results for individual tests yields some interesting observations.
+Recall that tests 1, 2, and 3 ("test set A") all utilized Model A, while tests
+4, 5, and 6 ("test set B") all utilized Model B. As Figure 6 demonstrates, the
+
+                                                  25
+           Figure 6: Marginal action likelihoods for each individual test.
+
+marginal action likelihood remained very similar within each test set. This in-
+dicates that the number of samples per prompt (the chief distinction between
+tests) has virtually no effect on the model's decision making. Despite this, Fig-
+ure 7 depicts how the action entropy varied quite significantly within each test
+set, increasingly drastically for tests that utilized more samples per prompt,
+but still following roughly the same distribution. This indicates that, while the
+models' decision making was relatively uniform across tests, the model grew
+increasingly uncertain the more times it viewed each prompt. Much like before,
+these results show that Compare forms consistently had the lowest action en-
+tropies, indicating that prompts presented using this format elicited responses
+with the highest confidence from the model.
+
+                  Figure 7: Action entropies for each individual test.
+
+Because both models had moderately high marginal action entropies (seen in
+Figure 3) this indicates an overall high level of uncertainty. As Scherrer, 2023
+
+                                                  26
+notes, such a result can be a result of either high inconsistency in responses (1
+- QF-C), high ambiguity of the question (QF-E), or a combination of both.
+
+        Figure 8: Average question-form specific entropies for each model
+        across both datasets.
+
+First, we calculate the average question-form specific entropy (QF-E), which
+corresponds to a model's uncertainty in a question averaged for all question
+forms. This essentially represents the ambiguity of the question itself to the
+model - higher values indicate that the question is ambiguous or unclear to the
+model. Figure 8 shows the distribution of question-form specific entropies for
+each model on each dataset.
+Both models exhibited average question-form specific entropies of roughly 0.46
+across the board, for both datasets. This indicates uncertainty levels equivalent
+to that of a fair coin toss, implying relative lack of confidence and likely con-
+tributing towards the high marginal action entropy. For additional context, we
+can also plot the question form consistencies to get an idea of how the models'
+behaviors may have been influenced by specific question forms.
+To examine this, the question form consistency is plotted in Figure 9. Each
+model had very similar question form consistencies across all datasets, center-
+ing around 0.83. This indicates that the models' remained quite consistent
+across the question forms, and that no individual question form had a partic-
+ularly different distribution relative to the average. This lines up with action
+likelihoods depicted in Figure 4, which showed relatively small variation across
+question formats.
+Due to the moderate levels of ambiguity and the low levels of inconsistency, the
+cause of the high marginal action entropies is not quite clear. It is certainly
+driven by the ambiguity foremost, since question form consistency was quite
+
+                                                  27
+   Figure 9: Question-form consistency for each model across both datasets.
+
+high and indicated that question form had little influence on behavior, but it is
+surprising to find that average question-form specific action entropy was below
+0.5 across the board, despite marginal action entopy being over 0.6. It is likely
+that the observed inconsistency levels of approximately 0.16, although not very
+high on their own, amplified the already-moderate ambiguity levels, resulting in
+further increases in the models' uncertainty.
+
+In order to gleam some information, we can examine the relationship between
+the average QF-specific entropy and the average QF-inconsistency (1-QFC),
+shown in Figure 10.
+
+Both models exhibited lower inconsistency and higher entropy for harmful prompts
+than for benign ones. This suggests that these prompts are less ambiguous, but
+that the model is more uncertain regarding its encoded preferences. This seems
+counterintuitive - less ambiguous questions would be expected to produce lower
+levels of uncertainty, and yet this is not the observed relationship from testing.
+It is worth noting however that both of these metrics were within very narrow
+ranges for both models, with QF-E only ranging between roughly 0.464 and
+0.470 and 1-QFC ranging between 0.160 and 0.167. Thus, while it may appear
+that the datapoints are very spread out, they all lie within very similar margins,
+suggesting that both models exhibited very similar results across each dataset,
+and to each other.
+
+To gain further insight, we can examine this same relationship across each in-
+dividual test performed. These results are much more widely distributed. For
+both test sets, the first test (i.e. test 1 and test 4) had the lowest entropy and
+the highest inconsistency for both datasets, while the second test (i.e. tests 2
+and 5) had significantly higher entropies and lower inconsistencies. The final
+
+                                                  28
+        Figure 10: The relationship between question-form specific action
+        entropy and question-form inconsistency (1 - QFC) for each model.
+
+test from each test set (i.e. tests 3 and 6) had higher entropy and very low
+inconsistency.
+
+Each pair of tests formed a small cluster containing four distinct points (each
+pair of test, across each dataset). This indicates that both models performed
+very similarly each test, across both datasets. Although at first glance it may
+appear that the second cluster (test 2 and test 4) only contains three points, this
+is because the icon for test 2 on adversarial benign data is obstructed by the icon
+for adversarial harmful data. This is the only instance where the relationship
+was identical for one model across both datasets, and becomes visible when
+plotting the data separately for each dataset.
+
+A weak negative relationship seems to exist between question form inconsistency
+and average question-form specific entropy, present among the results for the
+models themselves and persisting within the results for individual tests.
+
+Recall that, within each test set, the main difference between subsequent tests
+was the number of times each prompt was sampled by the model. This indicates
+that, as models review a single prompt multiple times, uncertainty increases
+but inconsistency (i.e. question ambiguity) decreases. This seems paradoxical,
+
+                                                  29
+        Figure 11: The relationship between question-form specific action
+        entropy and question-form inconsistency (1 - QFC) for each indi-
+        vidual test.
+and there is no clear explanation for these results, but it does explain why
+the marginal action likelihood remained consistent across almost all tests, since
+marginal action likelihood is driven by high uncertainty or high ambiguity.
+
+                                                  30
+6 Discussion
+
+This paper defined the creation and administering of a survey for evaluating the
+susceptibility of large language models towards jailbreak prompts. The survey
+was generated using Llama 3 8B Instruct, which was fed a series of benign
+and adversarial prompts form the WildJailbreak dataset and used to generate
+two different options that a language model could take when provided each
+each prompt. Two models within the Opt-IML family were subjected to the
+survey and had their results analyzed using statistical metrics previously used
+for identifying encoded moral beliefs. The results of this analysis would indicate
+how confident the models were in their answers to each prompt, which could be
+used to infer their susceptibility to malicious prompts. The results of the paper
+were inconclusive, with both models tending to prefer the option that involved
+complying with harmful requests. This trend was apparent for both harmful
+and benign prompts. Both models exhibited moderate levels of uncertainty in
+their answers, which did not stem from question ambiguity as initially suspected
+but instead may have arisen from confounding factors.
+
+The overall results of this paper indicated that both models were more suscep-
+tible to jailbreak prompts than expected, with slight preferences towards com-
+plying with the request over refusal. Average question ambiguity was relatively
+low, but high levels of uncertainty persisted regardless of how the question was
+presented. Additional sampling of a prompt seemed to simultaneously increase
+uncertainty but decrease ambiguity, and while this ultimately resulted in little
+change to the model's encoded preferences (i.e. marginal action likelihood), it
+does suggest that repeatedly inquiring the same prompt to a model may affect
+its susceptibility. This implies additional guardrails are necessary for ensuring
+that models lean towards refusal when presented with harmful prompts, but
+that care must be taken to ensure they do not refuse benign prompts that are
+mistakenly classified as harmful.
+
+6.1 Limitations
+
+The work performed in this paper was held back by several practical limita-
+tions. Because prompts can be phrased in any arbitrary number of ways, it is
+impossible to comprehensively account for all possible phrasings. Instead, this
+survey relied on a set of pre-defined question forms that were presented with
+equal probability. From this a Monte Carlo sampling was performed to esti-
+mate the action likelihood. The results would likely be different for real-world
+use cases, in which the same prompt could be presented using an infinite number
+of rewordings.
+
+The design of this survey is geared towards binary questions, and all scenarios
+were accompanied by only two options that the model could take. Any responses
+that deviated from these options were deemed invalid and ignored. As a result,
+these methods are not known to be applicable for multiple-choice or open-ended
+questions, where the model could take many or infinite responses. Designing a
+
+                                                  31
+survey to suit these purposes was beyond the scope of this project and would
+likely require a complete overhaul of the survey as it exists.
+Finally, the scope of this survey was limited in that only two models were used,
+both originating from Meta's Opt-IML family. Any judgments or assessments
+made can only be applied towards these models, and the varying performance
+of models in theory-of-mind tasks means that none of the results identified here
+can be properly extended to make inferences about any other models.
+
+6.2 Future Research Directions
+
+Of the limitations present in this paper, the problem of question form structure
+is effectively unsolvable. Unless models are explicitly designed to only process
+inputs of certain formats, which would defeat the purpose of having a large
+language model, there is no way to effectively capture all ways in which a given
+prompt can be structured or phrased. Any future research would benefit from
+comparing additional question forms beyond the ones used here, for a more
+comprehensive analysis. In this paper, all prompt formats were presented with
+equal probability, so experimenting with different ratios of prompt format (e.g.
+presenting a prompt using one format twice as often as another format) may
+also account for this practical limitation.
+Further research in this topic would benefit from expanding the survey to be
+administered to other language models beyond the two considered in this paper.
+Many higher-performing models, such as GPT-4 or DeepSeek R1, may exhibit
+more robust results or lower susceptibility to jailbreak prompts. This may also
+help address the seemingly-paradoxical relationship between uncertainty and
+ambiguity as the number of prompts sampled increased.
+
+                                                  32
+A Other Figures
+
+                                                  33
+B Acknowledgements
+
+This project would not have been possible without the assistance and guidance
+of XXXXX.
+
+                                                  34
+References
+
+[1] Srinivasan Iyer, Xi Victoria Lin, Ramakanth Pasunuru, Todor Mihaylov,
+    Da´niel Simig, Ping Yu, Kurt Shuster, Tianlu Wang, Qing Liu, Punit Singh
+    Koura, et al. Opt-iml: Scaling language model instruction meta learning
+    through the lens of generalization, 2022.
+
+                                                  35
+

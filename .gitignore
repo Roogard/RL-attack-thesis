@@ -15,3 +15,6 @@ LongMemEval/data/*.json
 results/
 *.jsonl
 logs/
+
+# Overleaf-synced paper (nested git repo, tracked separately)
+paper/
