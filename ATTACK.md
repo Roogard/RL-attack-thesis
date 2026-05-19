@@ -8,10 +8,10 @@ The attacker injects K synthetic "hub" vectors directly into the victim's retrie
 
 ## Threat model
 
-- Attacker has **domain knowledge** (personal-assistant memory, multi-session conversations) and **memory read access**.
-- Attacker does **not** see the victim's queries, only the existing memory contents.
+- Attacker has **domain knowledge** (personal-assistant memory, multi-session conversations), knows the **query distribution** (the kinds of questions users ask — not specific queries), and has **white-box knowledge of the retrieval stack** (the `all-MiniLM-L6-v2` encoder + cosine top-k policy).
+- Attacker does **not** see the victim's queries and does **not** read the victim's memory contents. Hubs are k-means centroids of training-split *question* embeddings and the Stage B poison is drawn from a separate train-split corpus, so the attack is **victim-independent / universal**: one hub set + one poison artifact is precomputed once and reused unchanged across every victim (`hub_scope = global`).
 - Attacker is **budget-constrained**: K injected hub chunks out of a ~250-chunk haystack.
-- In Stage A (current), the attacker has privileged **write access at the vector level** (`index_raw_embeddings`). This is the upper-bound setting — Stage B will drop this privilege.
+- In Stage A (current), the attacker has privileged **write access at the vector level** (`index_raw_embeddings`). This is the upper-bound diagnostic — Stage B drops this privilege and routes through the natural-corpus ingest channel.
 
 ## Primary attack metric: confident-answer rate
 

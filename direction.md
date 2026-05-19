@@ -18,24 +18,29 @@ An attack that pushes the model toward abstention gets paradoxical credit on the
 
 ### Attacker Capabilities
 - **Domain knowledge**: Knows the general purpose of the agent (personal assistant, medical, etc.)
-- **Memory read access**: Can observe what is currently stored in the agent's memory (realistic — many agents surface memory in responses like "I remember you said X")
+- **Query-distribution knowledge**: Knows the kinds of questions users tend to ask the agent (a personal-assistant deployment) — not the specific queries
+- **White-box retrieval stack**: Knows the encoder (`all-MiniLM-L6-v2`) and the cosine top-k retrieval policy
 - **Session injection**: Can submit conversation sessions that pass through the agent's normal memory pipeline (the agent decides what to store, the attacker doesn't write directly)
 - **Budget-constrained**: Limited to N poisoned sessions (e.g., 1–10) out of a larger history (e.g., 50 sessions)
 
 ### Attacker Does NOT Have
 - Knowledge of what questions will be asked (the key difference from MINJA)
 - Direct write access to the memory store (the key difference from pre-MINJA work)
-- Knowledge of the memory system's implementation details
+- Read access to the victim's stored memory contents — hubs and poison are computed from the query distribution alone, so the attack is victim-independent / universal
 
 ### Temporal-Leakage Caveat
-Each attacker-generated session is indexed with a `question_date` timestamp, which the attacker can observe (it is part of the conversation's metadata and visible through memory read-access). This means "query-blind" holds for *semantic* content but leaks along the *temporal* axis — an attacker can implicitly target "things that happened on/near date X" without seeing the query itself. Frame this in the thesis as: temporal context is part of domain knowledge, not query knowledge. The `*_abs` abstention and temporal-reasoning task types are where this caveat matters most and should be reported separately in ablations.
+Each attacker-generated session is indexed with a `question_date` timestamp, which the attacker can observe (it is part of the conversation's metadata, and the attacker controls the dates of the sessions it injects). This means "query-blind" holds for *semantic* content but leaks along the *temporal* axis — an attacker can implicitly target "things that happened on/near date X" without seeing the query itself. Frame this in the thesis as: temporal context is part of domain knowledge, not query knowledge. The `*_abs` abstention and temporal-reasoning task types are where this caveat matters most and should be reported separately in ablations.
 
 ### Where This Sits
 
+The attack needs neither query knowledge nor victim-memory access, so on the query-knowledge × memory-read-access axes it lands in the most-constrained quadrant:
+
 | | Knows future queries | Doesn't know future queries |
 |---|---|---|
-| **Has memory read access** | (overpowered) | **This work** |
-| **No memory access** | MINJA | Blind attack (ablation) |
+| **Has memory read access** | (overpowered) | (read access unused) |
+| **No memory access** | MINJA | **This work** |
+
+The paper's section 2.3 comparison table uses a different second axis — write access (direct vs. corpus-channel) — where this work is again the only entry with neither privileged write access nor query knowledge.
 
 ## Approach (revised)
 
